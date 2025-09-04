@@ -1,10 +1,11 @@
 # app.py — Retro CRT + Show Reasoning + Typewriter
 import streamlit as st
 from datetime import datetime
-from mcp_client import run_demo_blocking
+from mcp_client import execute_plan_blocking, fix_plan
+from publish import publish_repo
 import time
 from logger import log_mcp
-
+from llm import plan_llm, finalize_llm 
 try:
     from llm import ask_llm
 except Exception:
@@ -53,39 +54,6 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-st.write("")  # separador
-with st.container():
-    col1, col2, col3 = st.columns([3,2,2], vertical_alignment="center")
-    with col1:
-        st.markdown("**Demo MCP**: crear repo + README + commit")
-    with col2:
-        base_dir = st.text_input("Carpeta base", value=r"C:\Users\rodri\Documents\Redes\MoodST_Demos")
-    with col3:
-        repo_name = st.text_input("Nombre repo", value="mcp_repo_demo")
-
-run_demo = st.button("▶ Ejecutar demo MCP", use_container_width=True)
-if run_demo:
-    readme = (
-        "# MoodST Repo Demo\n\n"
-        "- Creado vía MCP Filesystem + MCP Git.\n"
-        "- Commit inicial automatizado.\n"
-    )
-    try:
-        repo_path, readme_path = run_demo_blocking(base_dir, repo_name, readme)
-        st.success(f"OK: Repo en {repo_path}\nREADME: {readme_path}")
-
-        # Log estructurado de la demo
-        log_mcp({
-            "event": "mcp_demo_repo",
-            "base_dir": base_dir,
-            "repo_name": repo_name,
-            "readme_path": readme_path
-        })
-    except Exception as e:
-        st.error(f"Fallo demo MCP: {e}")
-        log_mcp({"event":"mcp_demo_repo_error","error":str(e)})
-
-        
 # ===== Estado =====
 if "messages" not in st.session_state:
     st.session_state.messages = [
@@ -127,46 +95,67 @@ for m in st.session_state.messages:
 # ===== Input =====
 user_msg = st.chat_input("escribe tu mensaje…")
 if user_msg:
+    # 1) Mostrar mensaje de usuario
     now = datetime.now()
     st.session_state.messages.append({"role":"user","content":user_msg,"ts":now})
-    render_line("user", user_msg, now) 
+    render_line("user", user_msg, now)
 
-    # preparar contenedores para razonamiento y respuesta
+    m = re.search(r"[A-Za-z]:\\[^\n]+mcp_repo_demo", user_msg)
+    if m:
+        st.session_state["last_repo_path"] = m.group(0)
+    # Contenedores para razonamiento (expander) y respuesta (typewriter)
     reasoning_box = st.empty()
     typing_box = st.empty()
 
-    if ask_llm:
-        try:
-            hist = [x["content"] for x in st.session_state.messages if x["role"]=="user"]
-            result = ask_llm(user_msg, hist)  # {"reply":..., "thought":...}
-            reply = result["reply"]
-            thought = result["thought"]
-        except Exception as e:
-            reply, thought = f"(error backend) {e}", ""
-    else:
-        reply, thought = f"Recibido: {user_msg}", ""
+    # 2) Planner (Gemini): plan de acciones + thought
+    plan = plan_llm(user_msg, [m["content"] for m in st.session_state.messages if m["role"]=="user"])
+    thought = plan.get("thought","")
+    actions = plan.get("actions", [])
+    actions = fix_plan(actions)
+    reply_preview = plan.get("reply_preview","Procesando...")
 
-    # mostrar razonamiento inmediatamente
     if thought:
         with reasoning_box.expander("Ver razonamiento", expanded=False):
-            st.markdown(
-                f"<div style='font-size:16px; opacity:0.85; margin-left:20px'>{thought}</div>",
-                unsafe_allow_html=True
-            )
+            st.markdown(f"<div style='font-size:16px; opacity:0.85; margin-left:20px'>{thought}</div>", unsafe_allow_html=True)
 
-    # efecto typewriter para la respuesta
-    typewriter(typing_box, reply)
+    # 3) Ejecutar acciones MCP (si las hay) + loggear cada paso
+    execution_results = []
+    if actions:
+        log_mcp({"event":"mcp_plan", "actions": actions})
+        execution_results = execute_plan_blocking(actions)
+        for r in execution_results:
+            # log por acción
+            log_mcp({
+                "event": "mcp_tool_call",
+                "server": r["server"],
+                "tool": r["tool"],
+                "args": r.get("args", {}),
+                "ok": r.get("ok"),
+                "result": r.get("result"),
+                "error": r.get("error")
+            })
+    else:
+        # sin acciones: al menos log del plan
+        log_mcp({"event":"mcp_plan_empty", "user_msg": user_msg})
 
-    # guardar en historial
+    # 4) Finalizer (Gemini): redacta respuesta final para el usuario
+    final_text = finalize_llm(user_msg, execution_results) if actions else reply_preview or "Listo."
+    # typewriter de la respuesta final
+    out = ""
+    for ch in final_text:
+        out += ch
+        typing_box.markdown(f'<div class="line"><span class="tag">[MoodST]</span>{out}</div>', unsafe_allow_html=True)
+        time.sleep(0.01)
+
+    # 5) Guardar en historial + log de intercambio LLM
     now2 = datetime.now()
-    st.session_state.messages.append(
-        {"role": "assistant", "content": reply, "thought": thought, "ts": now2}
-    )
-
-    # 🔹 Loggear la interacción
+    st.session_state.messages.append({"role":"assistant","content":final_text,"thought":thought,"ts":now2})
     log_mcp({
         "event": "llm_exchange",
         "user": user_msg,
-        "assistant": reply,
-        "thought": thought
+        "assistant": final_text,
+        "thought": thought,
+        "actions": actions,
+        "execution_results": execution_results
     })
+    

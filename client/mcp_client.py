@@ -1,98 +1,235 @@
-# mcp_client.py
+# client/mcp_client.py
 import asyncio
-import os
-from typing import Iterable, Tuple
+from typing import List, Dict, Any
+from contextlib import AsyncExitStack
+import sys, os, subprocess
 
-from mcp import ClientSession, StdioServerParameters, types
+from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-# ---------- Helpers de conexión ----------
+try:
+    from pydantic import BaseModel as _BM
+except Exception:
+    _BM = None
 
-def _norm(path: str) -> str:
-    return os.path.normpath(path)
+def _dump_result(res_obj):
+    if _BM and isinstance(res_obj, _BM):
+        data = res_obj.model_dump()
+    elif isinstance(res_obj, dict):
+        data = res_obj
+    else:
+        try:
+            # objetos simples
+            from dataclasses import asdict
+            return asdict(res_obj)  # por si acaso
+        except Exception:
+            data = {"_repr": repr(res_obj)}
+    # normaliza bandera de error
+    is_err = bool(data.get("isError"))
+    # extrae texto si existe
+    text_chunks = []
+    for item in (data.get("content") or []):
+        t = item.get("text")
+        if t:
+            text_chunks.append(t)
+    if text_chunks:
+        data["_text"] = "\n".join(text_chunks)
+    return data, is_err
 
-def _ensure_dir(path: str):
-    os.makedirs(path, exist_ok=True)
+def _abspath(p: str) -> str:
+    return os.path.abspath(os.path.expandvars(os.path.expanduser(p)))
 
-async def _connect_stdio(command: str, args: Iterable[str]) -> ClientSession:
+def _is_git_repo(path: str) -> bool:
+    return os.path.isdir(os.path.join(path, ".git"))
+
+def _git_cli_init(path: str) -> str:
+    # Inicializa con git CLI para que el server MCP pueda arrancar
+    cp = subprocess.run(
+        ["git", "init"],
+        cwd=path,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        shell=False,
+    )
+    return cp.stdout
+
+def _nearest_existing_dir(p: str) -> str:
+    """Devuelve el ancestro existente más cercano de p (o la raíz)."""
+    p = _abspath(p)
+    while not os.path.isdir(p):
+        parent = os.path.dirname(p)
+        if parent == p:  # llegamos a raíz
+            break
+        p = parent
+    return p
+
+
+def _collect_target_paths(actions: List[Dict[str, Any]]) -> List[str]:
     """
-    Abre una sesión MCP por STDIO con el comando dado (p.ej. 'npx' o 'python -m ...').
-    Devuelve una ClientSession inicializada (debes cerrarla con 'async with').
+    Recolecta todos los campos 'path' y 'repo_path' de acciones para calcular
+    directorios permitidos en Filesystem MCP.
     """
-    params = StdioServerParameters(command=command, args=list(args))
-    read, write = await stdio_client(params).__aenter__()
-    session = ClientSession(read, write)
-    await session.initialize()
-    return session
+    paths = []
+    for a in actions:
+        args = a.get("args", {})
+        for k in ("path", "repo_path"):
+            v = args.get(k)
+            if v:
+                paths.append(v)
+    return paths
 
-# ---------- Conexiones a servidores ----------
 
-async def connect_filesystem(allowed_dirs: Iterable[str]) -> ClientSession:
+async def _fs_call(session: ClientSession, tool: str, args: Dict[str, Any]):
+    if tool == "create_directory":
+        return await session.call_tool("create_directory", {"path": _abspath(args["path"])})
+    if tool == "write_file":
+        return await session.call_tool("write_file", {"path": _abspath(args["path"]), "content": args["content"]})
+    raise ValueError(f"Filesystem tool no soportada: {tool}")
+
+
+async def _git_call(session: ClientSession, tool: str, args: Dict[str, Any]):
+    rp = _abspath(args.get("repo_path", "."))
+    if tool == "git_init":
+        return await session.call_tool("git_init", {"repo_path": rp})
+    if tool == "git_add":
+        files = [_abspath(f) for f in args["files"]]
+        return await session.call_tool("git_add", {"repo_path": rp, "files": files})
+    if tool == "git_commit":
+        return await session.call_tool("git_commit", {"repo_path": rp, "message": args["message"]})
+    raise ValueError(f"Git tool no soportada: {tool}")
+
+
+async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Filesystem server oficial:
-    npx -y @modelcontextprotocol/server-filesystem <dir1> <dir2> ...
+    Ejecuta acciones MCP y devuelve [{server, tool, args, ok, result|error}, ...].
+    - Filesystem se abre una vez con dirs permitidos “sanos” (ancestros existentes).
+    - Git se abre LAZY por repo cuando llega la primera acción git_* para ese repo.
     """
-    args = ["-y", "@modelcontextprotocol/server-filesystem", *allowed_dirs]
-    return await _connect_stdio("npx", args)
+    results: List[Dict[str, Any]] = []
 
-async def connect_git(repo_path: str) -> ClientSession:
-    """
-    Git MCP (local) vía pip:
-    python -m mcp_server_git --repository <repo_path>
-    """
-    repo = _norm(repo_path)
-    return await _connect_stdio("python", ["-m", "mcp_server_git", "--repository", repo])
+    # --- Calcular dirs permitidos para Filesystem ---
+    targets = _collect_target_paths(actions)
+    allowed_dirs = sorted({ _nearest_existing_dir(os.path.dirname(t)) for t in targets if t })
 
-# ---------- Wrappers de herramientas ----------
+    async with AsyncExitStack() as stack:
+        # ------- Filesystem (npx / npx.cmd en Windows) -------
+        fs_session = None
+        if allowed_dirs:
+            npx_cmd = "npx.cmd" if os.name == "nt" else "npx"
+            fs_params = StdioServerParameters(
+                command=npx_cmd,
+                args=["-y", "@modelcontextprotocol/server-filesystem", *allowed_dirs],
+                env={**os.environ, "DEBUG": "mcp*,*", "MCP_LOG_LEVEL": "debug", "NO_COLOR": "1"},
+            )
+            try:
+                fs_read, fs_write = await stack.enter_async_context(stdio_client(fs_params))
+                fs_session = ClientSession(fs_read, fs_write)
+                await stack.enter_async_context(fs_session)
+                await fs_session.initialize()
+            except Exception as e:
+                results.append({
+                    "server": "filesystem", "tool": "init",
+                    "args": {"allowed_dirs": allowed_dirs}, "ok": False,
+                    "error": f"No se pudo iniciar Filesystem MCP: {e}"
+                })
+                fs_session = None  # marca como no disponible
 
-async def fs_create_directory(fs: ClientSession, path: str):
-    return await fs.call_tool("create_directory", {"path": _norm(path)})
+        # ------- Git (lazy por repo) -------
+        git_sessions: Dict[str, ClientSession] = {}
 
-async def fs_write_file(fs: ClientSession, path: str, content: str):
-    return await fs.call_tool("write_file", {"path": _norm(path), "content": content})
+        async def ensure_git_session(repo_path: str) -> ClientSession:
+            rp = _abspath(repo_path)
+            os.makedirs(rp, exist_ok=True)          # 1) garantiza carpeta
 
-async def git_init(git: ClientSession, repo_path: str):
-    return await git.call_tool("git_init", {"repo_path": _norm(repo_path)})
+            if not _is_git_repo(rp):                # 2) si no es repo, init con CLI
+                _git_cli_init(rp)
 
-async def git_add(git: ClientSession, repo_path: str, files: Iterable[str]):
-    files = [ _norm(f) for f in files ]
-    return await git.call_tool("git_add", {"repo_path": _norm(repo_path), "files": files})
+            git_params = StdioServerParameters(     # 3) usa el MISMO Python del app
+                command=sys.executable,
+                args=["-m", "mcp_server_git", "--repository", rp],
+                env={**os.environ, "NO_COLOR": "1"},
+            )
+            g_read, g_write = await stack.enter_async_context(stdio_client(git_params))
+            g_sess = ClientSession(g_read, g_write)
+            await stack.enter_async_context(g_sess)
+            await g_sess.initialize()
+            git_sessions[rp] = g_sess
+            return g_sess
 
-async def git_commit(git: ClientSession, repo_path: str, message: str):
-    return await git.call_tool("git_commit", {"repo_path": _norm(repo_path), "message": message})
+        # ------- Ejecutar acciones en orden -------
+        for a in actions:
+            server = a.get("server")
+            tool   = a.get("tool")
+            args   = a.get("args", {})
+            try:
+                if server == "filesystem":
+                    if not fs_session:
+                        raise RuntimeError("Filesystem MCP no disponible.")
+                    # 👇 Si es write_file y el parent no existe, créalo antes
+                    if tool == "write_file":
+                        parent = os.path.dirname(_abspath(args["path"]))
+                        # crea el directorio del repo (un nivel) con el server FS
+                        await _fs_call(fs_session, "create_directory", {"path": parent})
+                    res = await _fs_call(fs_session, tool, args)
+                    res_json, is_err = _dump_result(res)
+                    if is_err:
+                        results.append({"server": server, "tool": tool, "args": args, "ok": False,
+                                        "error": res_json.get("_text") or "Tool returned isError", "result": res_json})
+                    else:
+                        results.append({"server": server, "tool": tool, "args": args, "ok": True,
+                                        "result": res_json})
 
-# ---------- Flujo DEMO pedido por el enunciado ----------
+                    
+                elif server == "git":
+                    rp = args.get("repo_path", ".")
+                    # Lazy start: asegura que la carpeta exista si el plan lo omitió
+                    repo_dir = _abspath(rp)
+                    parent = os.path.dirname(repo_dir)
+                    if not os.path.isdir(repo_dir):
+                        # si el primer paso git es git_init, la carpeta puede no existir todavía;
+                        # creamos el parent por si acaso (la carpeta del repo la crea filesystem.create_directory)
+                        os.makedirs(parent, exist_ok=True)
+                    g = await ensure_git_session(repo_dir)
+                    res = await _git_call(g, tool, args)
+                    res_json, is_err = _dump_result(res)
+                    if is_err:
+                        results.append({"server": server, "tool": tool, "args": args, "ok": False,
+                                        "error": res_json.get("_text") or "Tool returned isError", "result": res_json})
+                    else:
+                        results.append({"server": server, "tool": tool, "args": args, "ok": True,
+                                        "result": res_json})
 
-async def demo_init_repo_flow(base_dir: str, repo_name: str, readme_text: str) -> Tuple[str, str]:
-    """
-    1) crea carpeta
-    2) escribe README.md
-    3) git init
-    4) git add README.md
-    5) git commit -m "Initial commit"
+                else:
+                    raise ValueError(f"Servidor no soportado: {server}")
 
-    Devuelve (repo_path, readme_path)
-    """
-    base_dir = _norm(base_dir)
-    repo_path = _norm(os.path.join(base_dir, repo_name))
-    readme_path = _norm(os.path.join(repo_path, "README.md"))
+                results.append({"server": server, "tool": tool, "args": args, "ok": True, "result": res})
+            except Exception as e:
+                results.append({"server": server, "tool": tool, "args": args, "ok": False, "error": str(e)})
 
-    _ensure_dir(base_dir)
+    return results
 
-    # 1. Filesystem server con acceso al base_dir
-    async with (await connect_filesystem([base_dir])) as fs:
-        # Asegura carpeta repo y README
-        await fs_create_directory(fs, repo_path)
-        await fs_write_file(fs, readme_path, readme_text)
 
-    # 2. Git server apuntando al repo
-    async with (await connect_git(repo_path)) as git:
-        await git_init(git, repo_path)
-        await git_add(git, repo_path, ["README.md"])
-        await git_commit(git, repo_path, "Initial commit")
+def fix_plan(actions: list[dict]) -> list[dict]:
+    out = []
+    seen_repo_dirs = set()
+    for a in actions:
+        if a["server"] == "git":
+            rp = a["args"]["repo_path"]
+            repo_dir = _abspath(rp)
+            # inserta create_directory antes de la primera acción git para ese repo
+            if repo_dir not in seen_repo_dirs:
+                out.append({"server":"filesystem","tool":"create_directory","args":{"path": repo_dir}})
+                seen_repo_dirs.add(repo_dir)
+        if a["server"] == "filesystem" and a["tool"] == "write_file":
+            parent = os.path.dirname(_abspath(a["args"]["path"]))
+            # fuerza create_directory antes del write_file
+            out.append({"server":"filesystem","tool":"create_directory","args":{"path": parent}})
+        out.append(a)
+    return out
 
-    return repo_path, readme_path
 
-def run_demo_blocking(base_dir: str, repo_name: str, readme_text: str) -> Tuple[str, str]:
-    """Conveniencia para entornos síncronos (Streamlit/CLI)."""
-    return asyncio.run(demo_init_repo_flow(base_dir, repo_name, readme_text))
+def execute_plan_blocking(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return asyncio.run(execute_plan(actions))
+
