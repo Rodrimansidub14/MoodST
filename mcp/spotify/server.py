@@ -1,8 +1,10 @@
-# server.py — MCP Spotify (OAuth no bloqueante)
+# server.py 
 import os, logging, re
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 from pathlib import Path
+import random
+import time
 
 from tenacity import retry, wait_exponential, stop_after_attempt
 from dotenv import load_dotenv
@@ -276,7 +278,6 @@ def _new_oauth():
         cache_path=f".cache-{os.getenv('SPOTIFY_USERNAME','me')}",
         requests_timeout=10,
     )
-# --- añadir junto a tus @mcp.tool() existentes ---
 
 @mcp.tool()
 def ping() -> dict:
@@ -311,7 +312,6 @@ def auth_begin() -> dict:
             "authorize_url": None,
             "message": "OAuth de usuario deshabilitado: el servidor usa cuenta bot."
         }
-    # MODO NORMAL: devolver authorize_url
     global _pending_oauth
     _pending_oauth = _new_oauth()
     url = _pending_oauth.get_authorize_url()
@@ -321,7 +321,6 @@ def auth_begin() -> dict:
 def auth_complete(redirect_url: Optional[str] = None, code: Optional[str] = None) -> dict:
     if BOT_MODE:
         return {"ok": False, "bot_mode": True, "error": "auth_complete deshabilitado en BOT_MODE."}
-    # MODO NORMAL: completar con _pending_oauth o instancia nueva
     global _pending_oauth
     oauth = _pending_oauth or _new_oauth()
     if not code:
@@ -352,31 +351,271 @@ KEY_TO_MOOD = {
 }
 class MoodModel(Mood): pass
 
+KEY_TO_MOOD = {
+    "calm":        {"valence": 0.6, "energy": 0.2},
+    "focus":       {"valence": 0.55, "energy": 0.25},
+    "happy":       {"valence": 0.85, "energy": 0.6},
+    "sad":         {"valence": 0.2, "energy": 0.15},
+    "party":       {"valence": 0.8, "energy": 0.85, "danceability": 0.8},
+    "night":       {"valence": 0.55, "energy": 0.2},
+    "piano":       {"valence": 0.6, "energy": 0.25, "acousticness": 0.7, "instrumentalness": 0.5},
+
+    "rock and roll": {"valence": 0.75, "energy": 0.80},
+    "rock":          {"valence": 0.65, "energy": 0.75},
+    "metal":         {"valence": 0.45, "energy": 0.90},
+    "indie":         {"valence": 0.60, "energy": 0.55},
+    "jazz":          {"valence": 0.55, "energy": 0.35},
+    "lofi":          {"valence": 0.55, "energy": 0.20},
+    "reggaeton":     {"valence": 0.75, "energy": 0.80, "danceability": 0.85},
+    "trap":          {"valence": 0.50, "energy": 0.70, "danceability": 0.80},
+    "pop":           {"valence": 0.80, "energy": 0.65, "danceability": 0.75},
+
+    "electronic":    {"valence": 0.70, "energy": 0.85, "danceability": 0.80},
+    "edm":           {"valence": 0.75, "energy": 0.90, "danceability": 0.85},
+    "house":         {"valence": 0.70, "energy": 0.80, "danceability": 0.90},
+    "techno":        {"valence": 0.60, "energy": 0.95, "danceability": 0.85},
+    "dubstep":       {"valence": 0.55, "energy": 0.95, "danceability": 0.80},
+
+    "classical":     {"valence": 0.65, "energy": 0.25, "acousticness": 0.9, "instrumentalness": 0.95},
+    "orchestral":    {"valence": 0.60, "energy": 0.30, "acousticness": 0.85, "instrumentalness": 0.90},
+    "ambient":       {"valence": 0.50, "energy": 0.10, "acousticness": 0.95, "instrumentalness": 0.90},
+
+    "blues":         {"valence": 0.40, "energy": 0.35},
+    "soul":          {"valence": 0.70, "energy": 0.50},
+    "funk":          {"valence": 0.80, "energy": 0.70, "danceability": 0.85},
+    "r&b":           {"valence": 0.75, "energy": 0.60, "danceability": 0.80},
+
+    "hip hop":       {"valence": 0.70, "energy": 0.75, "danceability": 0.85},
+    "rap":           {"valence": 0.65, "energy": 0.80, "danceability": 0.80},
+
+    "folk":          {"valence": 0.60, "energy": 0.30, "acousticness": 0.85},
+    "country":       {"valence": 0.75, "energy": 0.55, "acousticness": 0.70},
+
+    "latin":         {"valence": 0.80, "energy": 0.75, "danceability": 0.85},
+    "salsa":         {"valence": 0.85, "energy": 0.80, "danceability": 0.90},
+    "cumbia":        {"valence": 0.80, "energy": 0.70, "danceability": 0.85},
+    "tango":         {"valence": 0.60, "energy": 0.50, "danceability": 0.70},
+
+    "reggae":        {"valence": 0.75, "energy": 0.50, "danceability": 0.80},
+    "ska":           {"valence": 0.80, "energy": 0.70, "danceability": 0.85},
+
+    "punk":          {"valence": 0.60, "energy": 0.95},
+    "grunge":        {"valence": 0.50, "energy": 0.80},
+
+    "disco":         {"valence": 0.85, "energy": 0.80, "danceability": 0.90},
+    "synthwave":     {"valence": 0.75, "energy": 0.70, "danceability": 0.80},
+
+    "chill":         {"valence": 0.65, "energy": 0.25},
+    "romantic":      {"valence": 0.80, "energy": 0.40},
+    "epic":          {"valence": 0.70, "energy": 0.90},
+    "dark":          {"valence": 0.30, "energy": 0.60},
+    "uplifting":     {"valence": 0.90, "energy": 0.80},
+    "melancholic":   {"valence": 0.35, "energy": 0.25},
+}
+
+GENRE_QUERY_HINTS = {
+    "rock and roll": [
+        "classic rock and roll 50s 60s", "rock and roll legends", "rockabilly classics"
+    ],
+    "rock": [
+        "classic rock anthems", "alternative rock classics", "90s rock hits", "modern rock bangers"
+    ],
+    "metal": [
+        "heavy metal classics", "thrash metal", "power metal anthems"
+    ],
+    "indie": [
+        "indie rock classics", "indie anthems", "bedroom indie"
+    ],
+    "jazz": [
+        "cool jazz classics", "hard bop classics", "modern jazz"
+    ],
+    "lofi": [
+        "lofi hip hop beats", "study lofi"
+    ],
+    "reggaeton": [
+        "reggaeton hits", "old school reggaeton classics", "perreo intenso"
+    ],
+    "trap": [
+        "latin trap hits", "trap bangers"
+    ],
+    "pop": [
+        "pop anthems", "80s pop classics", "modern pop hits"
+    ],
+    "electronic": [
+        "electronic dance hits", "electronic chill", "electronic classics"
+    ],
+    "edm": [
+        "edm festival anthems", "edm hits", "edm classics"
+    ],
+    "house": [
+        "house music classics", "deep house", "progressive house"
+    ],
+    "techno": [
+        "techno bangers", "classic techno", "minimal techno"
+    ],
+    "dubstep": [
+        "dubstep essentials", "classic dubstep", "modern dubstep"
+    ],
+    "classical": [
+        "classical masterpieces", "romantic era classics", "baroque classics"
+    ],
+    "orchestral": [
+        "orchestral film scores", "epic orchestral", "orchestral classics"
+    ],
+    "ambient": [
+        "ambient chill", "ambient soundscapes", "ambient classics"
+    ],
+    "blues": [
+        "blues legends", "classic blues", "modern blues"
+    ],
+    "soul": [
+        "soul classics", "neo soul", "motown hits"
+    ],
+    "funk": [
+        "funk classics", "modern funk", "funk legends"
+    ],
+    "r&b": [
+        "r&b classics", "modern r&b", "90s r&b hits"
+    ],
+    "hip hop": [
+        "hip hop classics", "modern hip hop", "old school hip hop"
+    ],
+    "rap": [
+        "rap anthems", "classic rap", "modern rap hits"
+    ],
+    "folk": [
+        "folk classics", "modern folk", "indie folk"
+    ],
+    "country": [
+        "country classics", "modern country hits", "country legends"
+    ],
+    "latin": [
+        "latin hits", "latin pop classics", "latin party"
+    ],
+    "salsa": [
+        "salsa classics", "salsa party", "modern salsa"
+    ],
+    "cumbia": [
+        "cumbia classics", "modern cumbia", "cumbia hits"
+    ],
+    "tango": [
+        "tango classics", "modern tango", "argentinian tango"
+    ],
+    "reggae": [
+        "reggae classics", "roots reggae", "modern reggae"
+    ],
+    "ska": [
+        "ska classics", "modern ska", "ska punk"
+    ],
+    "punk": [
+        "punk rock classics", "modern punk", "pop punk hits"
+    ],
+    "grunge": [
+        "grunge classics", "90s grunge", "modern grunge"
+    ],
+    "disco": [
+        "disco classics", "modern disco", "disco party"
+    ],
+    "synthwave": [
+        "synthwave classics", "modern synthwave", "retro synthwave"
+    ],
+    "chill": [
+        "chill hits", "chillout lounge", "chill vibes"
+    ],
+    "romantic": [
+        "romantic ballads", "love songs", "romantic classics"
+    ],
+    "epic": [
+        "epic soundtracks", "epic orchestral", "epic movie themes"
+    ],
+    "dark": [
+        "dark ambient", "dark electronic", "dark wave"
+    ],
+    "uplifting": [
+        "uplifting anthems", "feel good hits", "uplifting pop"
+    ],
+    "melancholic": [
+        "melancholic indie", "sad songs", "melancholic classics"
+    ],
+}
+
+class MoodModel(Mood):
+    query_hints: list[str] | None = None
+
 def infer_mood(prompt: str) -> MoodModel:
-    p = prompt.lower()
+    p = (prompt or "").lower()
+    for g in GENRE_QUERY_HINTS.keys():
+        if g in p:
+            base = KEY_TO_MOOD.get(g, {"valence": 0.6, "energy": 0.4})
+            return MoodModel(
+                mood=g,
+                valence=base.get("valence", 0.6),
+                energy=base.get("energy", 0.4),
+                tags=[g],
+                query_hints=GENRE_QUERY_HINTS[g]
+            )
     tags = [k for k in KEY_TO_MOOD if k in p]
     agg: Dict[str, float] = {}
     for k in tags:
         for kk, vv in KEY_TO_MOOD[k].items():
             agg[kk] = (agg.get(kk, 0.0) + vv) / 2 if kk in agg else vv
-    if not agg: agg = {"valence": 0.6, "energy": 0.4}; tags = ["neutral"]
-    return MoodModel(mood=tags[0], valence=agg.get("valence", 0.6), energy=agg.get("energy", 0.4), tags=tags)
+    if not agg:
+        if any(w in p for w in ("lluv", "rain", "rainy")):
+            agg = {"valence": 0.45, "energy": 0.30}
+            tags = ["rainy"]
+        else:
+            agg = {"valence": 0.6, "energy": 0.4}
+            tags = ["neutral"]
+    return MoodModel(mood=tags[0], valence=agg.get("valence", 0.6), energy=agg.get("energy", 0.4), tags=tags, query_hints=None)
 
 @mcp.tool()
 def analyze_mood(prompt: str):
     return infer_mood(prompt)
 
 @mcp.tool()
+
+@mcp.tool()
 def get_recommendations(seed_tracks: Optional[List[str]] = None, mood: Optional[str] = None,
                         energy: Optional[float] = None, valence: Optional[float] = None,
                         danceability: Optional[float] = None, tempo: Optional[float] = None,
                         limit: int = 20):
+    m = infer_mood(mood or "")
     targets = {k: v for k, v in dict(energy=energy, valence=valence, danceability=danceability, tempo=tempo).items() if v is not None}
-    if mood and not targets:
-        m = infer_mood(mood)
+    if m and not targets:
         targets = {"energy": m.energy, "valence": m.valence}
-    return [Track(**t) for t in svc().recommendations(seed_tracks or [], targets, limit=limit)]
 
+    tracks = svc().recommendations(seed_tracks or [], targets, limit=limit)
+    seen_art = set()
+    uniq = []
+    for t in tracks:
+        main = (t.get("artists") or [{}])[0].get("name", "").lower()
+        if main in seen_art:
+            continue
+        seen_art.add(main)
+        uniq.append(t)
+    uniq = uniq[: int(limit)]
+
+    rnd = random.Random(int(time.time() // 3600))
+    rnd.shuffle(uniq)
+
+    if len(uniq) < int(limit):
+        hints = (m.query_hints or []) if m else []
+        if hints:
+            need = int(limit) - len(uniq)
+            q = rnd.choice(hints)
+            more = svc().search_tracks(query=q, limit=min(50, need * 5))
+            for t in more:
+                main = (t.get("artists") or [{}])[0].get("name", "").lower()
+                if main in seen_art:
+                    continue
+                seen_art.add(main)
+                uniq.append(t)
+                if len(uniq) >= int(limit):
+                    break
+
+    return [Track(**t) for t in uniq[: int(limit)]]
+
+@mcp.tool()
 def create_playlist(self, name: str, description: str = "", public: bool = False):
     sp = self._require_user()
     if BOT_MODE:
@@ -478,7 +717,6 @@ def build_playlist_from_profile(
 def create_public_mix(mood_prompt: str, name: str = "Bot Mix", limit: int = 20) -> PlaylistRef:
     m = infer_mood(mood_prompt)
     targets = {"energy": m.energy, "valence": m.valence}
-    # seeds neutrales si no hay perfil (da igual, estamos en bot)
     themed = svc().search_tracks(query="alternative rock classics", limit=5)
     seeds = [t["id"] for t in themed] or []
     recs = svc().recommendations(seed_tracks=seeds, targets=targets, limit=limit)

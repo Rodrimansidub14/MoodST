@@ -11,13 +11,10 @@ except Exception:
     BaseModel = None
 
 def _json_default(o):
-    # Modelos Pydantic (MCP usa Pydantic v2)
     if BaseModel and isinstance(o, BaseModel):
         return o.model_dump()
-    # bytes -> texto
     if isinstance(o, (bytes, bytearray)):
         return o.decode("utf-8", errors="replace")
-    # último recurso
     return repr(o)
 
 def log_mcp(entry: dict):

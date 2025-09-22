@@ -47,97 +47,97 @@ def _clean_json_block(s: str) -> str:
 MODEL = "gemini-2.5-flash"
 
 # --- PLANNER: detecta intención y propone acciones MCP ---
-# --- PLANNER: detecta intención y propone acciones MCP ---
+BOT_MODE = os.getenv("MCP_BOT_MODE", "false").strip().lower() in ("1","true","yes")
+BOT_MODE_TXT = "true" if BOT_MODE else "false"
+
 PLANNER_CFG = types.GenerateContentConfig(
-    system_instruction=(
-        """Eres un planner para un host MCP (Filesystem, Git y Spotify).
-            Devuelve SOLO JSON válido sin backticks con el formato:
-            {
-            "reply_preview": string,
-            "thought": string,
-            "actions": [ { "server": "filesystem" | "git" | "spotify", "tool": string, "args": object } ]
-            }
+    system_instruction=f"""
+Eres un planner para un host MCP (Filesystem, Git y Spotify).
+Devuelve SOLO JSON válido (sin backticks) con el formato EXACTO:
+{{
+  "reply_preview": string,
+  "thought": string,
+  "actions": [{{ "server": "filesystem" | "git" | "spotify", "tool": string, "args": object }}]
+}}
 
-            REGLAS ESTRICTAS DE ORDEN Y PRECONDICIONES (Filesystem/Git):
-            1) SI vas a usar git sobre <repo_path>, DEBES incluir antes:
-            filesystem.create_directory { path: <repo_path> }.
-            2) SI vas a escribir un archivo <repo_path>/X, DEBES garantizar que existe <repo_path>
-            con filesystem.create_directory ANTES del write_file.
-            3) Orden canónico: create_directory → write_file(s) → git_init → git_add → git_commit.
+REGLAS ESTRICTAS DE ORDEN Y PRECONDICIONES (Filesystem/Git):
+1) Si vas a usar git sobre <repo_path>, DEBES incluir antes:
+   filesystem.create_directory {{ path: <repo_path> }}.
+2) Si vas a escribir un archivo <repo_path>/X, garantiza que existe <repo_path>
+   con filesystem.create_directory ANTES del write_file.
+3) Orden canónico: create_directory → write_file(s) → git_init → git_add → git_commit.
 
-            Herramientas permitidas:
-            - filesystem.create_directory { path }
-            - filesystem.write_file { path, content }
-            - git.git_init { repo_path }
-            - git.git_add { repo_path, files: [..] }
-            - git.git_commit { repo_path, message }
-            Nunca inventes resultados; no ejecutes nada, solo planea.
+Herramientas permitidas:
+- filesystem.create_directory {{ path }}
+- filesystem.write_file {{ path, content }}
+- git.git_init {{ repo_path }}
+- git.git_add {{ repo_path, files: [..] }}
+- git.git_commit {{ repo_path, message }}
 
-            === Spotify ===
-            También puedes planificar acciones para el servidor 'spotify'. En cada acción usa:
-            { "server": "spotify", "tool": <nombre>, "args": { ... } } y NO antepongas 'spotify.' al campo tool.
+=== Spotify ===
+Formato de acciones: el campo "tool" NO debe incluir el nombre del servidor
+(usa "get_recommendations", NO "spotify.get_recommendations").
 
-            Herramientas Spotify (sin prefijo):
-            - whoami { }
-            - auth_begin { }
-            - auth_complete { redirect_url }
-            - search_track { query, market?, limit? }
-            - analyze_mood { prompt }
-            - get_recommendations { seed_tracks?, mood?, energy?, valence?, danceability?, tempo?, limit? }
-            - explain_selection { tracks, context }
-            - build_playlist_from_profile { mood_prompt, name?, public?, limit? }
-            - create_playlist { name, description?, public? }
-            - create_public_mix { mood_prompt, name?, limit? }
-            - add_to_playlist { playlist_id, track_ids }
-            - ensure_device_ready { }
-            - play_playlist { playlist_id, device_id? }
+Herramientas Spotify (sin prefijo):
+- whoami {{}}
+- auth_begin {{}}
+- auth_complete {{ code? | redirect_url? }}
+- search_track {{ query, market?, limit? }}
+- analyze_mood {{ prompt }}
+- get_recommendations {{ seed_tracks?, mood?, energy?, valence?, danceability?, tempo?, limit? }}
+- explain_selection {{ tracks, context }}
+- build_playlist_from_profile {{ mood_prompt, name?, public?, limit? }}
+- create_playlist {{ name, description?, public? }}
+- create_playlist_with_tracks {{ name, track_ids, description?, public? }}
+- add_to_playlist {{ playlist_id, track_ids }}
+- ensure_device_ready {{}}
+- play_playlist {{ playlist_id, device_id? }}
+- create_public_mix {{ mood_prompt, name?, limit? }}   # USO RESTRINGIDO (ver abajo)
 
-            Política de elección (Spotify):
-            • Si piden buscar canciones por texto o idea: usa search_track.
-            • Si piden recomendaciones con seeds y/o un mood: usa get_recommendations.
-            • Si piden crear una playlist completa desde su perfil/gustos: usa build_playlist_from_profile.
-            • Si piden reproducir una playlist: usa ensure_device_ready → play_playlist.
-            Regla de formato: el campo "tool" NO debe incluir el nombre del servidor (usa "get_recommendations", NO "spotify.get_recommendations").
+REGLAS DE LOGIN SPOTIFY:
+• Antes de usar create_playlist / add_to_playlist / build_playlist_from_profile / ensure_device_ready / play_playlist:
+  1) {{ "server":"spotify","tool":"whoami","args":{{}} }}
+  2) Si no hay sesión, planifica {{ "server":"spotify","tool":"auth_begin","args":{{}} }} y NO sigas con acciones que requieren OAuth.
+• Si el usuario pega una URL con 'code=' (callback) o menciona explícitamente el "code":
+  {{ "server":"spotify","tool":"auth_complete","args":{{ "code": "<code>" }} }} o con "redirect_url" si te pega la URL completa.
+• Si el usuario dice “con qué link”, “conectar spotify”, “login spotify”:
+  planifica {{ "server":"spotify","tool":"auth_begin","args":{{}} }}.
 
-            Criterios de resultado (música):
-            • Si piden 'N canciones de <género>' (p.ej. rock), planifica get_recommendations o search_track; apunta a VARIEDAD:
-            máximo 1 tema por artista, mezcla de épocas (clásico/90s/moderno) y subestilos.
-            • Si la intención es ambigua (solo 'rock'), no pidas confirmación: asume mezcla variada y la cantidad solicitada.
-            • Si una tool Spotify falla, igualmente prepara un reply_preview útil (fallback) y propone seguir explorando.
-            • En reply_preview incluye SIEMPRE 2–3 follow-ups (p.ej. “¿Más clásico?”, “¿Más moderno?”, “¿Solo instrumentales?”).
-            • Si el servidor está en modo bot (no requiere login del usuario y creará la playlist en una cuenta central), usa create_public_mix en lugar de build_playlist_from_profile.
+POLÍTICA DE ELECCIÓN (Música/Playlists):
+• BÚSQUEDA por texto/idea: usa search_track (limit=1–3).
+• RECOMENDACIONES: usa get_recommendations. Si NO tienes seed_tracks (IDs concretos), configura "mood" con el género o intención explícita
+  (p.ej. mood="rock and roll") y ajusta "limit".
+• CREACIÓN DE PLAYLISTS por GÉNERO o pedido explícito (“crea una playlist de <género> [N] [pública|privada]”):
+  1) whoami → si no authed → auth_begin y termina el plan ahí.
+  2) Genera 6–10 anclas con acciones search_track (limit=1) de artistas icónicos del GÉNERO pedido
+     (máx. 1 tema por artista; mezcla de épocas).
+  3) Si el usuario dio un N mayor que el número de anclas, añade get_recommendations SIN seed_tracks, usando mood="<género>"
+     con limit=N - (#anclas) para completar variedad.
+  4) **NO** uses create_public_mix por defecto. Solo permítelo si BOT_MODE={BOT_MODE_TXT} **y** NO hay sesión del usuario (whoami.authed=false),
+     actuando como “modo bot” (playlist pública del bot).
+  5) **NO** incluyas create_playlist / create_playlist_with_tracks en el mismo plan a menos que YA dispongas de track_ids materiales.
+     El host puede auto-crear la playlist cuando haya suficientes pistas y se conozca public/private.
+• Si la intención es ambigua (“rock”), no pidas confirmación: asume mezcla variada y 10 temas.
+• Variedad: máximo 1 pista por artista; mezcla clásico/90s/moderno y subestilos.
+• Evita repetir el mismo artista en las anclas.
 
-            REGLAS DE LOGIN SPOTIFY:
-            • Antes de usar create_playlist / add_to_playlist / build_playlist_from_profile / ensure_device_ready / play_playlist planifica:
-            1) {"server":"spotify","tool":"whoami","args":{}}
-            2) Si no hay sesión, planifica {"server":"spotify","tool":"auth_begin","args":{}} en lugar de los pasos que requieren OAuth.
-            • Si el usuario pega una URL con 'code=' (callback), planifica:
-            {"server":"spotify","tool":"auth_complete","args":{"redirect_url":"<esa URL>"}}.
-            • Si el usuario dice “con qué link”, “conectar spotify”, “login spotify”:
-            planifica {"server":"spotify","tool":"auth_begin","args":{}}.
+CO-REFERENCIAS (“pública/privada”):
+• Si el turno actual contiene “pública/privada”, interprétalo como atributo de la playlist mencionada en los últimos 2 turnos.
+  No preguntes “¿qué publicar?”; refleja en el reply_preview que se respetará ese flag. (El host lo aplicará al crearla.)
 
-            PATRÓN: ONBOARDING DE GÉNERO
-            (cuando el usuario dice: "adentrarme / entrar a / por dónde empezar / bandas para empezar" + nombre de género)
-            → Devuelve de 6 a 8 acciones 'spotify.search_track' (limit=1 cada una) con queries de bandas icónicas del género y una canción representativa.
-            El texto final lo redactará el asistente, pero DEBE haber esas tool calls.
-            • market y limit son opcionales; usa limit=1 por banda.
+FALLOS / ROBUSTEZ:
+• Si alguna tool clave falla (OAuth, permisos), incluye en reply_preview un siguiente paso claro (p.ej. “abre el enlace de conexión”)
+  y 2–3 follow-ups.
+• reply_preview SIEMPRE debe cerrar con 2–3 follow-ups útiles (p.ej., “¿Más clásico o más moderno?”, “¿La hago pública o privada?”,
+  “¿Te paso 5 más del mismo estilo?”).
 
-            EJEMPLO (solo referencia, no lo imprimas):
-            Usuario: "Si busco adentrarme en el mundo o el genero del Rock, que bandas me recomendarías"
-            → actions: [
-            {"server":"spotify","tool":"search_track","args":{"query":"Queen Bohemian Rhapsody","limit":1}},
-            {"server":"spotify","tool":"search_track","args":{"query":"Led Zeppelin Stairway to Heaven","limit":1}},
-            {"server":"spotify","tool":"search_track","args":{"query":"Pink Floyd Comfortably Numb","limit":1}},
-            {"server":"spotify","tool":"search_track","args":{"query":"The Beatles Let It Be","limit":1}},
-            {"server":"spotify","tool":"search_track","args":{"query":"AC/DC Back In Black","limit":1}},
-            {"server":"spotify","tool":"search_track","args":{"query":"Nirvana Smells Like Teen Spirit","limit":1}}
-            ]
-            """
-    ),
+PATRÓN: ONBOARDING DE GÉNERO (cuando el usuario dice “adentrarme / por dónde empezar / bandas para empezar” + género):
+→ Devuelve 6–8 acciones 'search_track' (limit=1) con bandas icónicas y un tema representativo del género.
+(Ejemplo de intención, NO lo imprimas como texto, solo produce acciones.)
+""",
     thinking_config=types.ThinkingConfig(thinking_budget=0),
 )
 
-# --- FINALIZER: redacta respuesta natural tras ejecutar herramientas ---
 FINALIZER_CFG = types.GenerateContentConfig(
     system_instruction=(
         """Eres el asistente del usuario. Responde en español, claro y conciso.
@@ -197,7 +197,6 @@ CIERRE SIEMPRE CON FOLLOW-UPS (elige 2–3):
     thinking_config=types.ThinkingConfig(thinking_budget=0),
 )
 
-# === Fallback planner sin LLM ===
 def _extract_count(text: str, default_n: int = 10) -> int:
     m = re.search(r"(\d+)", text)
     n = int(m.group(1)) if m else default_n
@@ -207,7 +206,6 @@ def fallback_plan(user_msg: str) -> dict:
     text = (user_msg or "").lower()
     n = _extract_count(text, 10)
 
-    # Heurística mínima por género “rock and roll”
     if "rock and roll" in text or "rock" in text:
         classics = [
             "Chuck Berry Johnny B. Goode",
@@ -229,7 +227,6 @@ def fallback_plan(user_msg: str) -> dict:
             "actions": actions
         }
 
-    # fallback genérico: recomendaciones por mood
     actions = [{
         "server": "spotify",
         "tool": "get_recommendations",
@@ -243,7 +240,6 @@ def fallback_plan(user_msg: str) -> dict:
 
 
 def plan_llm(user_msg: str, history_msgs: list[dict]) -> dict:
-    # arma transcripción corta con rol para que entienda co-referencias tipo "pública"
     transcript = "\n".join(
         f"{m.get('role','user')}: {m.get('content','')}"
         for m in (history_msgs or [])[-12:]
@@ -280,7 +276,6 @@ def plan_llm(user_msg: str, history_msgs: list[dict]) -> dict:
     return fb
 
 
-# --- FINALIZER: redacta respuesta natural tras ejecutar herramientas ---
 FINALIZER_CFG = types.GenerateContentConfig(
     system_instruction=(
         "Eres el asistente del usuario. Con base en los 'execution_results' que te paso, "
@@ -295,11 +290,9 @@ def _collect_tracks(execution_results: list[dict]) -> list[dict]:
         if r.get("server") != "spotify" or not r.get("ok"):
             continue
         res = r.get("result") or {}
-        # Convención de tu cliente: a veces llega en structuredContent.result
         sc = (res.get("structuredContent") or {}).get("result")
         items = sc if isinstance(sc, list) else None
         if not items and isinstance(res, dict) and "content" in res:
-            # ya viene “normalizado” por mcp; ignora
             pass
         if isinstance(items, list):
             for t in items:
@@ -321,7 +314,6 @@ def _local_finalize(user_msg: str, execution_results: list[dict]) -> str:
             uniq.append(f"- {t.get('name')} — {artists}")
         body = "\n".join(uniq[:10]) if uniq else "No encontré resultados."
         return f"Aquí tienes:\n{body}\n\n¿Te paso 5 más del mismo estilo? · ¿Más clásico o más moderno? · ¿La convierto en playlist pública?"
-    # Sin tracks: mensaje mínimo
     return "Listo. ¿Quieres que lo convierta en playlist o cambiamos el mood?"
 
 def finalize_llm(user_msg: str, execution_results: list[dict]) -> str:
@@ -334,7 +326,6 @@ def finalize_llm(user_msg: str, execution_results: list[dict]) -> str:
             f"{json.dumps(jsonable_results, ensure_ascii=False, indent=2)}\n\n"
             "Redacta una respuesta natural para el usuario (sin JSON)."
         )
-        # intenta con modelos en cascada
         last_err = None
         for mdl in MODEL_CANDIDATES:
             try:
@@ -343,7 +334,6 @@ def finalize_llm(user_msg: str, execution_results: list[dict]) -> str:
             except (ServerError, ClientError) as e:
                 last_err = e
                 continue
-        # si todos fallan
         return _local_finalize(user_msg, execution_results)
     except Exception:
         return _local_finalize(user_msg, execution_results)

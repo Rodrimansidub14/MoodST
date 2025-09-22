@@ -26,7 +26,7 @@ SCOPES = [
     "user-top-read",
     "user-read-recently-played",
     "user-read-currently-playing",
-    "user-read-private",  # a veces útil para verificar cuenta
+    "user-read-private", 
 ]
 SCOPE_STR = " ".join(SCOPES)
 
@@ -47,7 +47,7 @@ def _build_user_client() -> Optional[spotipy.Spotify]:
     cid = os.environ["SPOTIPY_CLIENT_ID"]
     csec = os.environ["SPOTIPY_CLIENT_SECRET"]
     redir = os.environ["SPOTIPY_REDIRECT_URI"]
-    logging.info("OAuth redirect_uri=%s", redir)  # debería imprimir 127.0.0.1
+    logging.info("OAuth redirect_uri=%s", redir)  
     oauth = SpotifyOAuth(
         client_id=cid,
         client_secret=csec,
@@ -66,11 +66,11 @@ class SpotifyService:
         self.clients = SpotifyClients(app=_build_app_client(), user=None)
     def _ensure_user(self) -> spotipy.Spotify:
         if self.clients.user is None:
-            self.clients.user = _build_user_client()  # esto abre el browser (open_browser=True) si falta token
+            self.clients.user = _build_user_client() 
         return self.clients.user
 
     def _require_user(self) -> spotipy.Spotify:
-        sp = self._ensure_user()  # 👈 clave: dispara OAuth si falta
+        sp = self._ensure_user()  
         return sp
 
     def _sp_tracks(self, ids: list[str]):
@@ -85,7 +85,6 @@ class SpotifyService:
         """Devuelve una lista de IDs de pista (22 chars) válidos, sin prefijos."""
         if not seeds:
             return []
-        # aceptar string, lista de strings, URIs, separados por coma/espacio/nueva línea
         if isinstance(seeds, str):
             toks = re.split(r"[,\s]+", seeds.strip())
         else:
@@ -101,13 +100,12 @@ class SpotifyService:
 
         out, seen = [], set()
         for t in toks:
-            tid = t.split(":")[-1]  # quita spotify:track:
+            tid = t.split(":")[-1]  
             if len(tid) == 22 and tid not in seen:
                 seen.add(tid)
                 out.append(tid)
         return out
     
-    # ---------- Catalog-only (app token) ----------
     def search_tracks(self, query: str, limit: int = 10, market: Optional[str] = None) -> List[Dict[str, Any]]:
         sp = self.clients.app
         res = sp.search(q=query, type="track", limit=limit, market=market or self.market)
@@ -126,9 +124,8 @@ class SpotifyService:
             """Devuelve map id -> features. Tolerante a errores/403 y con chunking."""
             if not track_ids:
                 return {}
-            # normaliza a IDs (sin prefijo)
             ids = [str(t).split(":")[-1] for t in track_ids if t]
-            CHUNK = 50  # seguro << 100 (límite Spotify)
+            CHUNK = 50  
             out = {}
             for i in range(0, len(ids), CHUNK):
                 batch = ids[i:i+CHUNK]
@@ -137,7 +134,6 @@ class SpotifyService:
                 except SpotifyException as e:
                     logging.warning("audio_features failed (%s) on batch=%d; skip features",
                                     getattr(e, "http_status", e), len(batch))
-                    # Fallback duro: sin features → devolvemos lo que haya
                     return {}
                 except Exception as e:
                     logging.warning("audio_features error: %s", e)
@@ -162,17 +158,13 @@ class SpotifyService:
 
             ids = [t.get("id") for t in candidates if t and t.get("id")]
             fm = self.audio_features_map(ids)
-            # sin features → quedate con el orden original (o por popularidad si querés)
             if not fm:
-                # Muchos endpoints ya devuelven ordenado por popularidad; si querés forzar:
-                # return sorted(candidates, key=lambda t: -(t.get("popularity") or 0))
                 return candidates
 
             keys = ("energy", "valence", "danceability", "tempo")
             want = {k: targets.get(k) for k in keys if targets.get(k) is not None}
 
             def norm_tempo(x):
-                # 60–240 BPM → 0..1
                 return max(0.0, min(1.0, (float(x) - 60.0) / 180.0))
 
             def dist(t):
@@ -193,7 +185,6 @@ class SpotifyService:
     def recommendations(self, seed_tracks, targets: Dict[str, float], limit: int = 20):
         sp = self.clients.app
 
-        # 1) Normaliza seeds a IDs de 22 chars
         ids = []
         toks = []
         if isinstance(seed_tracks, str):
@@ -207,7 +198,6 @@ class SpotifyService:
                 ids.append(tid)
         ids = ids[:5]
 
-        # 2) Valida por market y toma artistas de cada track
         valid_ids, artist_ids = [], []
         if ids:
             meta = self._sp_tracks(ids)
@@ -222,14 +212,12 @@ class SpotifyService:
                         artist_ids.append(a["id"])
         artist_ids = list(dict.fromkeys(artist_ids))[:5]
 
-        # 3) Targets seguros → target_*
         tgt = {}
         for k in ("energy", "valence", "danceability", "tempo"):
             v = targets.get(k)
             if v is not None:
                 tgt[f"target_{k}"] = float(v)
 
-        # 4) Intento “oficial” con /recommendations (si funciona en tu entorno)
         def _official(**params):
             try:
                 logging.info("Trying recommendations with params=%s", params)
@@ -256,13 +244,10 @@ class SpotifyService:
                         "preview_url": t.get("preview_url"),
                     } for t in tr]
 
-        # 5) FALLBACK HEURÍSTICO (sin /recommendations):
-        #    - artistas relacionados → top tracks
-        #    - si no hay seeds, búsqueda temática
+
         candidates = []
 
         if artist_ids:
-            # relacionados de cada artista
             for aid in artist_ids:
                 try:
                     rel = sp.artist_related_artists(aid).get("artists", [])[:5]
@@ -277,15 +262,10 @@ class SpotifyService:
                         pass
 
         if not candidates:
-            # fallback temático a partir del mood
-            q = "lofi rain calm piano"  # puedes ajustar por mood
             try:
-                sr = sp.search(q=q, type="track", limit=50, market=self.market)
-                candidates.extend(sr.get("tracks", {}).get("items", []))
-            except Exception:
-                pass
+                candidates.extend(sp.search(q="lofi rain calm piano", type="track", limit=50, market=self.market).get("tracks", {}).get("items", []))
+            except: pass
 
-        # dedup + filtra por market
         seen = set(); clean = []
         for t in candidates:
             if not t or not t.get("id"): 
@@ -297,7 +277,6 @@ class SpotifyService:
                 continue
             seen.add(t["id"]); clean.append(t)
 
-        # ordena por cercanía a targets y limita
         ranked = self._rank_by_targets(clean, targets)[:int(limit)]
         return [{
             "id": t["id"],
@@ -308,7 +287,6 @@ class SpotifyService:
         } for t in ranked]
 
 
-    # ---------- User actions (OAuth usuario) ----------
     def _require_user(self) -> spotipy.Spotify:
         if not self.clients.user:
             raise PermissionError("Acción requiere OAuth de usuario configurado (.env) y login previo.")
@@ -340,7 +318,6 @@ class SpotifyService:
     def start_or_transfer(self, playlist_uri: str, device_id: Optional[str]) -> str:
         sp = self._require_user()
         try:
-            # start playback (Premium requirement)
             sp.start_playback(device_id=device_id, context_uri=playlist_uri)
             return "playing"
         except spotipy.exceptions.SpotifyException as e:
@@ -348,7 +325,6 @@ class SpotifyService:
             if e.http_status == 403:
                 return "not_premium"
             raise
-# dentro de class SpotifyService:
 
 def user_seed_track_ids(self, want: int = 5) -> list[str]:
     """Devuelve hasta 'want' track IDs personalizadas del perfil (top tracks → recently played → top artists)."""
@@ -356,7 +332,6 @@ def user_seed_track_ids(self, want: int = 5) -> list[str]:
     seen = set()
     seeds: list[str] = []
 
-    # 1) Top tracks
     try:
         top = sp.current_user_top_tracks(limit=min(20, max(5, want*3)), time_range="medium_term")
         for it in top.get("items", []):
@@ -368,7 +343,6 @@ def user_seed_track_ids(self, want: int = 5) -> list[str]:
     except Exception:
         pass
 
-    # 2) Recently played
     try:
         rp = sp.current_user_recently_played(limit=50)
         for it in rp.get("items", []):
@@ -381,7 +355,6 @@ def user_seed_track_ids(self, want: int = 5) -> list[str]:
     except Exception:
         pass
 
-    # 3) Top artists → artist top tracks
     try:
         arts = sp.current_user_top_artists(limit=5, time_range="medium_term")
         for a in arts.get("items", []):
@@ -395,4 +368,4 @@ def user_seed_track_ids(self, want: int = 5) -> list[str]:
     except Exception:
         pass
 
-    return seeds  # puede ser < want; el caller hace fallback
+    return seeds  

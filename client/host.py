@@ -22,7 +22,6 @@ def main():
         ans = ask_llm(q, session.get_context())
         print(ans)
 
-        # simulación de log MCP (por ahora dummy)
         log_mcp({"event": "llm_exchange", "user": q, "assistant": ans})
 
 if __name__ == "__main__":

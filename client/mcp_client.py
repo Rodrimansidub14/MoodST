@@ -307,7 +307,8 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                             "track_ids": args.get("track_ids") or [],
                             "description": args.get("description", ""),
                             "public": bool(args.get("public", False)),
-    })
+                        })
+
 
                     elif tool == "explain_selection":
                         res = await sp.call_tool("explain_selection", {

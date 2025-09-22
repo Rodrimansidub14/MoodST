@@ -16,7 +16,6 @@ def publish_repo(repo_path: str, remote_url: str, commit_msg: str | None = None,
     repo_path = _abs(repo_path)
     steps: list[dict] = []
 
-    # 1) add/commit (tolerante a 'nothing to commit')
     if add_all:
         steps.append({**_run(["git", "add", "-A"], repo_path), "step": "git add -A"})
 
@@ -27,18 +26,15 @@ def publish_repo(repo_path: str, remote_url: str, commit_msg: str | None = None,
         res["step"] = "git commit"
         steps.append(res)
 
-    # 2) determinar rama actual (main/master)
     r = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], repo_path)
     branch = r["output"] if r["ok"] else "main"
     steps.append({**r, "step": "detect branch"})
 
-    # 3) origin (si existe, set-url)
     r = _run(["git", "remote", "add", "origin", remote_url], repo_path)
     if (not r["ok"]) and "already exists" in r["output"].lower():
         r = _run(["git", "remote", "set-url", "origin", remote_url], repo_path)
     r["step"] = "set origin"
     steps.append(r)
 
-    # 4) push
     steps.append({**_run(["git", "push", "-u", "origin", branch], repo_path), "step": "git push"})
     return steps
