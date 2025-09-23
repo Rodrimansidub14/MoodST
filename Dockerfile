@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
 WORKDIR /app
-COPY mcp/remote/server.py /app/server.py
+COPY mcp/remote/rem_server.py /app/server.py
 
 RUN pip install fastapi uvicorn
 

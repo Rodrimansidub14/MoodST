@@ -262,9 +262,7 @@ class SpotifyService:
                         pass
 
         if not candidates:
-            try:
-                candidates.extend(sp.search(q="lofi rain calm piano", type="track", limit=50, market=self.market).get("tracks", {}).get("items", []))
-            except: pass
+            return []
 
         seen = set(); clean = []
         for t in candidates:

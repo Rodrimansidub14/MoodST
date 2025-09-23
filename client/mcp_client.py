@@ -17,7 +17,6 @@ except Exception:
     _BM = None
 
 # ====== Configuración del server MCP de LoL (STDIO) ======
-# ====== Configuración del server MCP de LoL (STDIO “line-based” de tu compañero) ======
 _MLOL_ENTRY = r"C:\Users\rodri\Documents\Redes\MoodST\mcp\lol\server.py"
 LOL_SERVER_CMD = sys.executable
 LOL_SERVER_ARGS = [_MLOL_ENTRY]
@@ -68,6 +67,34 @@ class MoviesHttpClient:
 
     def tools_call(self, name: str, arguments: dict):
         return self._rpc("tools/call", {"name": name, "arguments": arguments})
+
+
+# Server rmoto
+MCP_REMOTE_URL = os.environ.get(
+    "MCP_REMOTE_URL",
+    "https://mcp-remote-822069824080.us-central1.run.app/mcp/jsonrpc"
+).strip()
+class TimeHttpClient:
+    def __init__(self, endpoint: str):
+        self.endpoint = endpoint
+        self._inited = False
+        self._req_id = 0
+
+    def _rpc(self, method: str, params: dict | None = None):
+        self._req_id += 1
+        payload = {"jsonrpc": "2.0", "id": self._req_id, "method": method, "params": params or {}}
+        r = requests.post(self.endpoint, json=payload, timeout=20)
+        r.raise_for_status()
+        return r.json()
+
+    def initialize(self):
+        if not self._inited:
+            self._rpc("initialize", {})
+            self._inited = True
+
+    def tools_call(self, name: str, arguments: dict):
+        return self._rpc("tools/call", {"name": name, "arguments": arguments})
+
 
 # ====== Utilidades comunes ======
 def _dump_result(res_obj):
@@ -362,6 +389,18 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             mc.initialize()
             movies_client = mc
             return mc
+        
+        # ------- Remote MCP (Cloud Run HTTP) -------
+        time_client: Optional[TimeHttpClient] = None
+
+        def ensure_time_client() -> TimeHttpClient:
+            nonlocal time_client
+            if time_client:
+                return time_client
+            tc = TimeHttpClient(MCP_REMOTE_URL)
+            tc.initialize()
+            time_client = tc
+            return tc
 
         # ------- Ejecutar acciones en orden -------
         for a in actions:
@@ -541,6 +580,24 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                         })
                     else:
                         raise ValueError(f"Herramienta movies no soportada: {tool}")
+
+                    if "error" in resp:
+                        results.append({
+                            "server": server, "tool": tool, "args": args,
+                            "ok": False, "result": None, "error": str(resp["error"])
+                        })
+                    else:
+                        results.append({
+                            "server": server, "tool": tool, "args": args,
+                            "ok": True, "result": resp.get("result") or resp, "error": None
+                        })
+
+                elif server == "time":
+                    tc = ensure_time_client()
+                    if tool == "current_time":
+                        resp = tc.tools_call("current_time", {})
+                    else:
+                        raise ValueError(f"Herramienta time no soportada: {tool}")
 
                     if "error" in resp:
                         results.append({

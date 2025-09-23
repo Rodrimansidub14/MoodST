@@ -3,3 +3,10 @@ mcp/spotify/.env.example
 mcp/calendar/credentials.json
 mcp/calendar/token.json
 mcp/calendar/*.log
+mcp/spotify/.cache
+mcp/spotify/.cache-bot
+mcp/spotify/.cache-*
+mcp/spotify/__pycache__
+client/.cache
+client/.cache-bot
+_client/__pycache__

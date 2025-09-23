@@ -66,7 +66,7 @@ Herramientas permitidas:
 - git.git_init {{ repo_path }}
 - git.git_add {{ repo_path, files: [..] }}
 - git.git_commit {{ repo_path, message }}
-
+- time.current_time {{}}
 === Spotify ===
 Formato de acciones: el campo "tool" NO debe incluir el nombre del servidor
 (usa "get_recommendations", NO "spotify.get_recommendations").
