@@ -4,14 +4,12 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from google.genai.errors import ServerError, ClientError  
-# llm.py (añade arriba)
 try:
     from pydantic import BaseModel as _PydBase
 except Exception:
     _PydBase = None
 
 def _to_jsonable(obj):
-    # Maneja recursivo: BaseModel, listas, dicts...
     if _PydBase and isinstance(obj, _PydBase):
         return obj.model_dump()
     if isinstance(obj, dict):
@@ -22,12 +20,10 @@ def _to_jsonable(obj):
         return obj
     return repr(obj)
 
-
 load_dotenv()
 API_KEY = os.getenv("GEMINI_API_KEY")
 if not API_KEY:
     raise RuntimeError("Falta GEMINI_API_KEY en .env")
-
 
 client = genai.Client(api_key=API_KEY)
 
@@ -36,28 +32,25 @@ MODEL_CANDIDATES = [
     "gemini-2.5-pro",
     "gemini-2.5-flash-lite"
 ]
-# --- Utilidad: limpia ```json ... ``` ---
 def _clean_json_block(s: str) -> str:
     s = s.strip()
     s = re.sub(r"^```[a-zA-Z]*\n?", "", s)
     s = re.sub(r"```$", "", s)
     return s.strip()
 
-# --- MODELOS ---
 MODEL = "gemini-2.5-flash"
 
-# --- PLANNER: detecta intención y propone acciones MCP ---
 BOT_MODE = os.getenv("MCP_BOT_MODE", "false").strip().lower() in ("1","true","yes")
 BOT_MODE_TXT = "true" if BOT_MODE else "false"
 
 PLANNER_CFG = types.GenerateContentConfig(
     system_instruction=f"""
-Eres un planner para un host MCP (Filesystem, Git, Spotify y Calendar).
+Eres un planner para un host MCP (Filesystem, Git y Spotify).
 Devuelve SOLO JSON válido (sin backticks) con el formato EXACTO:
 {{
   "reply_preview": "string",
   "thought": "string",
-  "actions": [{{ "server": "filesystem" | "git" | "spotify" | "calendar", "tool": "string", "args": {{}} }}]
+  "actions": [{{ "server": "filesystem" | "git" | "spotify", "tool": "string", "args": {{}} }}]
 }}
 
 REGLAS ESTRICTAS DE ORDEN Y PRECONDICIONES (Filesystem/Git):
@@ -73,12 +66,6 @@ Herramientas permitidas:
 - git.git_init {{ repo_path }}
 - git.git_add {{ repo_path, files: [..] }}
 - git.git_commit {{ repo_path, message }}
-
-# Calendar (Google)
-- calendar.get_daily_agenda {{ when? }}
-- calendar.get_agenda {{ when? }}    # alias
-- calendar.create_calendar_event {{ title, when, duration_minutes?, meet_link? }}
-- calendar.send_daily_summary {{}}
 
 === Spotify ===
 Formato de acciones: el campo "tool" NO debe incluir el nombre del servidor
@@ -140,23 +127,9 @@ FALLOS / ROBUSTEZ:
 PATRÓN: ONBOARDING DE GÉNERO (cuando el usuario dice “adentrarme / por dónde empezar / bandas para empezar” + género):
 → Devuelve 6–8 acciones 'search_track' (limit=1) con bandas icónicas y un tema representativo del género.
 (Ejemplo de intención, NO lo imprimas como texto, solo produce acciones.)
-
-=== Calendar ===
-• Para “¿qué tengo hoy/mañana/<YYYY-MM-DD>?” → usar get_daily_agenda/get_agenda con el campo when tal cual.
-• Para “crea ‘TÍTULO’ <hoy|mañana|YYYY-MM-DD> HH:MM por D minutos [con Meet]” →
-  create_calendar_event con:
-    - title = "TÍTULO",
-    - when = texto de fecha/hora tal cual (ej.: "mañana 10:30" o "2025-09-23 14:00"),
-    - duration_minutes = D (default 60 si no se da),
-    - meet_link = true solo si el usuario lo pide (p. ej. “con Meet”, “con link de Meet”).
-• Para “envíame el resumen del día (por correo)” → send_daily_summary sin argumentos.
-• No pidas confirmación si el usuario ya dio hora/duración/meet; usa valores por defecto razonables cuando falten.
-• Si el usuario no especifica fecha/hora, usa “hoy 09:00” y duración 60 minutos por defecto.
 """,
     thinking_config=types.ThinkingConfig(thinking_budget=0),
 )
-
-
 
 FINALIZER_CFG = types.GenerateContentConfig(
     system_instruction=(
@@ -258,7 +231,6 @@ def fallback_plan(user_msg: str) -> dict:
         "actions": actions
     }
 
-
 def plan_llm(user_msg: str, history_msgs: list[dict]) -> dict:
     transcript = "\n".join(
         f"{m.get('role','user')}: {m.get('content','')}"
@@ -294,7 +266,6 @@ def plan_llm(user_msg: str, history_msgs: list[dict]) -> dict:
     fb = fallback_plan(user_msg)
     fb["thought"] += f" (motivo: {type(last_err).__name__})"
     return fb
-
 
 FINALIZER_CFG = types.GenerateContentConfig(
     system_instruction=(

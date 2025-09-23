@@ -1,8 +1,11 @@
 # client/mcp_client.py
 import asyncio
+from asyncio import wait_for
 from typing import List, Dict, Any, Optional
 from contextlib import AsyncExitStack
 import sys, os, subprocess
+import requests  # para Movies (HTTP)
+import threading
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -13,12 +16,21 @@ try:
 except Exception:
     _BM = None
 
+# ====== Configuración del server MCP de LoL (STDIO) ======
+# ====== Configuración del server MCP de LoL (STDIO “line-based” de tu compañero) ======
+_MLOL_ENTRY = r"C:\Users\rodri\Documents\Redes\MoodST\mcp\lol\server.py"
+LOL_SERVER_CMD = sys.executable
+LOL_SERVER_ARGS = [_MLOL_ENTRY]
+
 
 # ====== Configuración del server MCP de Spotify ======
 # Puedes sobreescribir por env:
 #  - MCP_SPOTIFY_ENTRY="mcp_server_spotify"        → python -m mcp_server_spotify
 #  - MCP_SPOTIFY_ENTRY="path/a/server_spotify.py"  → python path/a/server_spotify.py
-_MSP_ENTRY = os.environ.get("MCP_SPOTIFY_ENTRY", r"C:\Users\rodri\Documents\Redes\MoodST\mcp\spotify\server.py").strip()
+_MSP_ENTRY = os.environ.get(
+    "MCP_SPOTIFY_ENTRY",
+    r"C:\Users\rodri\Documents\Redes\MoodST\mcp\spotify\server.py"
+).strip()
 
 if _MSP_ENTRY:
     if _MSP_ENTRY.endswith(".py"):
@@ -32,19 +44,32 @@ else:
     SPOTIFY_SERVER_CMD = sys.executable
     SPOTIFY_SERVER_ARGS = ["-m", "mcp.spotify.server"]  # <-- ajusta si tu módulo se llama distinto
 
+# ====== Movies (HTTP JSON-RPC hacia FastAPI /mcp/jsonrpc) ======
+MOVIES_HTTP_URL = os.environ.get("MCP_MOVIES_HTTP_URL", "http://0.0.0.0:8000/mcp/jsonrpc").strip()
 
-# ====== Configuración del server MCP de Calendar (Google Calendar/Gmail) ======
-# Puedes sobreescribir por env:
-#  - MCP_CALENDAR_ENTRY="path\a\google_calendar_mcp_server.py"
-CAL_SERVER_ENTRY = os.environ.get(
-    "MCP_CALENDAR_ENTRY",
-    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "mcp", "calendar", "google_calendar_mcp_server.py"))
-).strip()
+class MoviesHttpClient:
+    def __init__(self, endpoint: str):
+        self.endpoint = endpoint
+        self._inited = False
+        self._req_id = 0
 
-CAL_SERVER_CMD = sys.executable
-CAL_SERVER_ARGS = [CAL_SERVER_ENTRY]
+    def _rpc(self, method: str, params: dict | None = None):
+        self._req_id += 1
+        payload = {"jsonrpc": "2.0", "id": self._req_id, "method": method, "params": params or {}}
+        r = requests.post(self.endpoint, json=payload, timeout=20)
+        r.raise_for_status()
+        return r.json()
 
+    def initialize(self):
+        if self._inited:
+            return
+        self._rpc("initialize", {})
+        self._inited = True
 
+    def tools_call(self, name: str, arguments: dict):
+        return self._rpc("tools/call", {"name": name, "arguments": arguments})
+
+# ====== Utilidades comunes ======
 def _dump_result(res_obj):
     """Normaliza la respuesta de call_tool a dict y marca isError si corresponde."""
     if _BM and isinstance(res_obj, _BM):
@@ -72,14 +97,11 @@ def _dump_result(res_obj):
 
     return data, is_err
 
-
 def _abspath(p: str) -> str:
     return os.path.abspath(os.path.expandvars(os.path.expanduser(p)))
 
-
 def _is_git_repo(path: str) -> bool:
     return os.path.isdir(os.path.join(path, ".git"))
-
 
 def _git_cli_init(path: str) -> str:
     """Inicializa un repo Git con la CLI para que el server MCP pueda abrirlo sin quejarse."""
@@ -94,7 +116,6 @@ def _git_cli_init(path: str) -> str:
     )
     return cp.stdout
 
-
 def _nearest_existing_dir(p: str) -> str:
     """Devuelve el ancestro existente más cercano de p (o la raíz)."""
     p = _abspath(p)
@@ -104,7 +125,6 @@ def _nearest_existing_dir(p: str) -> str:
             break
         p = parent
     return p
-
 
 def _collect_target_paths(actions: List[Dict[str, Any]]) -> List[str]:
     """
@@ -119,14 +139,12 @@ def _collect_target_paths(actions: List[Dict[str, Any]]) -> List[str]:
                 paths.append(v)
     return paths
 
-
 async def _fs_call(session: ClientSession, tool: str, args: Dict[str, Any]):
     if tool == "create_directory":
         return await session.call_tool("create_directory", {"path": _abspath(args["path"])})
     if tool == "write_file":
         return await session.call_tool("write_file", {"path": _abspath(args["path"]), "content": args["content"]})
     raise ValueError(f"Filesystem tool no soportada: {tool}")
-
 
 async def _git_call(session: ClientSession, tool: str, args: Dict[str, Any]):
     rp = _abspath(args.get("repo_path", "."))
@@ -140,14 +158,72 @@ async def _git_call(session: ClientSession, tool: str, args: Dict[str, Any]):
     raise ValueError(f"Git tool no soportada: {tool}")
 
 
+class LolLineClient:
+    def __init__(self, cmd: str, args: List[str], cwd: Optional[str] = None, env: Optional[dict] = None):
+        self.cmd = cmd
+        self.args = args
+        self.cwd = cwd
+        self.env = env or os.environ.copy()
+        self.proc: Optional[subprocess.Popen] = None
+        self._id_lock = threading.Lock()
+        self._req_id = 0
+
+    def _next_id(self) -> int:
+        with self._id_lock:
+            self._req_id += 1
+            return self._req_id
+
+    def start(self):
+        if self.proc and self.proc.poll() is None:
+            return
+        self.proc = subprocess.Popen(
+            [self.cmd, *self.args],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            cwd=self.cwd,
+            env=self.env,
+        )
+        # initialize RPC (su server soporta "initialize")
+        self.rpc("initialize", {})
+
+    def rpc(self, method: str, params: dict | None = None, timeout: float = 60.0):
+        if not self.proc or self.proc.poll() is not None:
+            raise RuntimeError("MCP LoL process not running.")
+        rid = self._next_id()
+        req = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}}
+        line = json.dumps(req, ensure_ascii=False)
+        assert self.proc.stdin is not None
+        assert self.proc.stdout is not None
+        self.proc.stdin.write(line + "\n")
+        self.proc.stdin.flush()
+
+        resp_line = self.proc.stdout.readline()
+        if not resp_line:
+            err = (self.proc.stderr.read() if self.proc.stderr else "") or "no response"
+            raise RuntimeError(f"No response from LoL MCP server.\nStderr:\n{err}")
+        data = json.loads(resp_line)
+        if "error" in data:
+            msg = data["error"].get("message", "Unknown MCP error")
+            raise RuntimeError(msg)
+        return data.get("result")
+
+    def call_tool(self, name: str, arguments: dict):
+        # El server de tu compañero expone tools vía "tools/call"
+        return self.rpc("tools/call", {"name": name, "arguments": arguments})
+
+# ====== Ejecutor principal ======
 async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Ejecuta acciones MCP y devuelve [{server, tool, args, ok, result|error}, ...].
 
     - Filesystem: se abre una vez con dirs permitidos “sanos” (ancestros existentes).
     - Git: sesión LAZY por repo cuando llega la primera acción git_* para ese repo.
-    - Spotify: sesión LAZY cuando aparece la primera acción del server "spotify" o "spotify-context".
-    - Calendar: sesión LAZY cuando aparece la primera acción del server "calendar".
+    - Spotify: sesión LAZY global.
+    - LoL: sesión LAZY global.
+    - Movies: cliente HTTP LAZY.
     """
     results: List[Dict[str, Any]] = []
 
@@ -211,12 +287,6 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "PYTHONPATH": os.pathsep.join([os.environ.get("PYTHONPATH", ""), PROJECT_ROOT]),
         }
 
-        params = StdioServerParameters(
-            command=SPOTIFY_SERVER_CMD,
-            args=SPOTIFY_SERVER_ARGS,
-            env=BASE_ENV,
-        )
-
         async def ensure_spotify_session() -> ClientSession:
             nonlocal spotify_session
             if spotify_session:
@@ -224,9 +294,8 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             params = StdioServerParameters(
                 command=SPOTIFY_SERVER_CMD,
                 args=SPOTIFY_SERVER_ARGS,
-                env=BASE_ENV,  # ← en vez de {**os.environ, "NO_COLOR":"1"}
+                env=BASE_ENV,
             )
-
             try:
                 sp_read, sp_write = await stack.enter_async_context(stdio_client(params))
                 spotify_session = ClientSession(sp_read, sp_write)
@@ -235,46 +304,38 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 return spotify_session
             except Exception as e:
                 # Propaga un error legible para el finalizer
-                raise RuntimeError(f"No pude iniciar el servidor MCP de Spotify. CMD={SPOTIFY_SERVER_CMD} ARGS={SPOTIFY_SERVER_ARGS} ERROR={e}")
-
-        # ------- Calendar -------
-        calendar_session: Optional[ClientSession] = None
-
-        async def ensure_calendar_session() -> ClientSession:
-            nonlocal calendar_session
-            if calendar_session:
-                return calendar_session
-            cal_params = StdioServerParameters(
-                command=CAL_SERVER_CMD,
-                args=CAL_SERVER_ARGS,
-                env={**os.environ, "NO_COLOR": "1"},
-            )
-            try:
-                cal_read, cal_write = await stack.enter_async_context(stdio_client(cal_params))
-                calendar_session = ClientSession(cal_read, cal_write)
-                await stack.enter_async_context(calendar_session)
-                await calendar_session.initialize()
-                # Smoke test: lista de herramientas
-                try:
-                    tools = await calendar_session.list_tools()
-                    # opcional: loggea las herramientas detectadas
-                    results.append({
-                        "server": "calendar", "tool": "init",
-                        "args": {"entry": CAL_SERVER_ENTRY},
-                        "ok": True,
-                        "result": {"tools": [t.name for t in tools.tools]},
-                        "error": None
-                    })
-                except Exception as e:
-                    raise RuntimeError(f"Calendar MCP inició pero no respondió a tools/list: {e}")
-                return calendar_session
-            except Exception as e:
-                # Propaga un error legible para que NO se quede colgado el host
                 raise RuntimeError(
-                    f"No pude iniciar el servidor MCP de Calendar. "
-                    f"ENTRY={CAL_SERVER_ENTRY} CMD={CAL_SERVER_CMD} ARGS={CAL_SERVER_ARGS} ERROR={e}"
+                    f"No pude iniciar el servidor MCP de Spotify. CMD={SPOTIFY_SERVER_CMD} "
+                    f"ARGS={SPOTIFY_SERVER_ARGS} ERROR={e}"
                 )
 
+        # ------- LoL (lazy global) -------
+        lol_client: Optional[LolLineClient] = None
+
+        def ensure_lol_client() -> LolLineClient:
+            nonlocal lol_client
+            if lol_client:
+                return lol_client
+            cwd = os.path.dirname(LOL_SERVER_ARGS[0])
+            env = {**os.environ, "NO_COLOR": "1", "PYTHONUNBUFFERED": "1"}
+            lol_client = LolLineClient(LOL_SERVER_CMD, LOL_SERVER_ARGS, cwd=cwd, env=env)
+            lol_client.start()
+            return lol_client
+
+
+
+
+        # ------- Movies HTTP (lazy) -------
+        movies_client: Optional[MoviesHttpClient] = None
+
+        def ensure_movies_client() -> MoviesHttpClient:
+            nonlocal movies_client
+            if movies_client:
+                return movies_client
+            mc = MoviesHttpClient(MOVIES_HTTP_URL)
+            mc.initialize()
+            movies_client = mc
+            return mc
 
         # ------- Ejecutar acciones en orden -------
         for a in actions:
@@ -415,7 +476,8 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                             })
                         except Exception as e2:
                             results.append({
-                                "server":"spotify","tool":"auth_begin","args":{},"ok":False,"error":str(e2)
+                                "server": "spotify", "tool": "auth_begin", "args": {},
+                                "ok": False, "error": str(e2)
                             })
 
                     results.append({
@@ -425,51 +487,66 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                         "error": res_json.get("_text") if is_err else None
                     })
 
-                elif server == "calendar":
-                    try:
-                        cal = await ensure_calendar_session()
-                    except Exception as e:
-                        results.append({
-                            "server": "calendar", "tool": "init",
-                            "args": {"entry": CAL_SERVER_ENTRY},
-                            "ok": False,
-                            "result": None,
-                            "error": str(e)
+                elif server == "lol":
+                    # Usa el cliente line-based
+                    lc = ensure_lol_client()
+                    if tool == "fetch_static_data":
+                        # tu server expone fetch como RPC dedicado
+                        res = lc.rpc("fetch_static_data", {
+                            "ddragon_version": args.get("ddragon_version", "latest"),
+                            "lang": args.get("lang", "en_US"),
                         })
-                        continue 
-                    if tool in ("get_daily_agenda", "get_agenda"):
-                        res = await cal.call_tool(tool, {"when": args.get("when")})
-                    elif tool == "create_calendar_event":
-                        payload = {
-                            "title": args.get("title"),
-                            "when": args.get("when"),
-                            "duration_minutes": int(args.get("duration_minutes", 60)),
-                            "meet_link": bool(args.get("meet_link", False)),
-                        }
-                        res = await cal.call_tool(tool, payload)
-                    elif tool == "send_daily_summary":
-                        res = await cal.call_tool("send_daily_summary", {})
+                    elif tool in ("analyze_enemies", "suggest_items", "suggest_runes", "suggest_summoners", "plan_build"):
+                        res = lc.call_tool(tool, args)
                     else:
-                        raise ValueError(f"Herramienta calendar no soportada: {tool}")
+                        raise ValueError(f"Herramienta lol no soportada: {tool}")
 
-                    res_json, is_err = _dump_result(res)
+                    # En el server “line-based” el result ya es dict final (no MCP content)
                     results.append({
                         "server": server, "tool": tool, "args": args,
-                        "ok": not is_err,
-                        "result": None if is_err else res_json,
-                        "error": (res_json.get("_text") or "Tool returned isError") if is_err else None,
+                        "ok": True, "result": res, "error": None
+                    })
+
+                elif server == "movies":
+                    mc = ensure_movies_client()
+                    if tool == "search_movie":
+                        resp = mc.tools_call("search_movie", {"title": args.get("title", "")})
+                    elif tool == "get_random_movie":
+                        resp = mc.tools_call("get_random_movie", {})
+                    elif tool == "get_movie_recommendations":
+                        resp = mc.tools_call("get_movie_recommendations", {
+                            "genres": args.get("genres") or [],
+                            "min_rating": args.get("min_rating", 7.0)
+                        })
+                    else:
+                        raise ValueError(f"Herramienta movies no soportada: {tool}")
+
+                    if "error" in resp:
+                        results.append({
+                            "server": server, "tool": tool, "args": args,
+                            "ok": False, "result": None, "error": str(resp["error"])
+                        })
+                    else:
+                        results.append({
+                            "server": server, "tool": tool, "args": args,
+                            "ok": True, "result": resp.get("result") or resp, "error": None
+                        })
+
+                else:
+                    # servidor/descripción desconocida
+                    results.append({
+                        "server": server, "tool": tool, "args": args,
+                        "ok": False, "result": None,
+                        "error": f"Servidor no soportado: {server}"
                     })
 
             except Exception as e:
                 results.append({
                     "server": server, "tool": tool, "args": args,
-                    "ok": False,
-                    "result": None,
-                    "error": str(e)
+                    "ok": False, "result": None, "error": str(e)
                 })
 
     return results
-
 
 def fix_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Inserta precondiciones: create_directory antes de git y antes de write_file."""
@@ -495,7 +572,5 @@ def fix_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         out.append(a)
 
     return out
-
-
 def execute_plan_blocking(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return asyncio.run(execute_plan(actions))
