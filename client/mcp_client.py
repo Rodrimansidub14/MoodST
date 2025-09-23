@@ -33,6 +33,18 @@ else:
     SPOTIFY_SERVER_ARGS = ["-m", "mcp.spotify.server"]  # <-- ajusta si tu módulo se llama distinto
 
 
+# ====== Configuración del server MCP de Calendar (Google Calendar/Gmail) ======
+# Puedes sobreescribir por env:
+#  - MCP_CALENDAR_ENTRY="path\a\google_calendar_mcp_server.py"
+CAL_SERVER_ENTRY = os.environ.get(
+    "MCP_CALENDAR_ENTRY",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "mcp", "calendar", "google_calendar_mcp_server.py"))
+).strip()
+
+CAL_SERVER_CMD = sys.executable
+CAL_SERVER_ARGS = [CAL_SERVER_ENTRY]
+
+
 def _dump_result(res_obj):
     """Normaliza la respuesta de call_tool a dict y marca isError si corresponde."""
     if _BM and isinstance(res_obj, _BM):
@@ -135,6 +147,7 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     - Filesystem: se abre una vez con dirs permitidos “sanos” (ancestros existentes).
     - Git: sesión LAZY por repo cuando llega la primera acción git_* para ese repo.
     - Spotify: sesión LAZY cuando aparece la primera acción del server "spotify" o "spotify-context".
+    - Calendar: sesión LAZY cuando aparece la primera acción del server "calendar".
     """
     results: List[Dict[str, Any]] = []
 
@@ -224,6 +237,45 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 # Propaga un error legible para el finalizer
                 raise RuntimeError(f"No pude iniciar el servidor MCP de Spotify. CMD={SPOTIFY_SERVER_CMD} ARGS={SPOTIFY_SERVER_ARGS} ERROR={e}")
 
+        # ------- Calendar -------
+        calendar_session: Optional[ClientSession] = None
+
+        async def ensure_calendar_session() -> ClientSession:
+            nonlocal calendar_session
+            if calendar_session:
+                return calendar_session
+            cal_params = StdioServerParameters(
+                command=CAL_SERVER_CMD,
+                args=CAL_SERVER_ARGS,
+                env={**os.environ, "NO_COLOR": "1"},
+            )
+            try:
+                cal_read, cal_write = await stack.enter_async_context(stdio_client(cal_params))
+                calendar_session = ClientSession(cal_read, cal_write)
+                await stack.enter_async_context(calendar_session)
+                await calendar_session.initialize()
+                # Smoke test: lista de herramientas
+                try:
+                    tools = await calendar_session.list_tools()
+                    # opcional: loggea las herramientas detectadas
+                    results.append({
+                        "server": "calendar", "tool": "init",
+                        "args": {"entry": CAL_SERVER_ENTRY},
+                        "ok": True,
+                        "result": {"tools": [t.name for t in tools.tools]},
+                        "error": None
+                    })
+                except Exception as e:
+                    raise RuntimeError(f"Calendar MCP inició pero no respondió a tools/list: {e}")
+                return calendar_session
+            except Exception as e:
+                # Propaga un error legible para que NO se quede colgado el host
+                raise RuntimeError(
+                    f"No pude iniciar el servidor MCP de Calendar. "
+                    f"ENTRY={CAL_SERVER_ENTRY} CMD={CAL_SERVER_CMD} ARGS={CAL_SERVER_ARGS} ERROR={e}"
+                )
+
+
         # ------- Ejecutar acciones en orden -------
         for a in actions:
             server = a.get("server")
@@ -282,7 +334,6 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                             raise ValueError("auth_complete requiere 'code' o 'redirect_url'.")
                         res = await sp.call_tool("auth_complete", payload)
 
-
                     elif tool == "search_track":
                         res = await sp.call_tool("search_track", {
                             "query": args["query"],
@@ -308,8 +359,6 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                             "description": args.get("description", ""),
                             "public": bool(args.get("public", False)),
                         })
-
-
                     elif tool == "explain_selection":
                         res = await sp.call_tool("explain_selection", {
                             "tracks": args["tracks"],
@@ -346,7 +395,6 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                             "name": args.get("name", "Bot Mix"),
                             "limit": int(args.get("limit", 20)),
                         })
-
                     else:
                         raise ValueError(f"Herramienta spotify no soportada: {tool}")
 
@@ -375,6 +423,41 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                         "ok": not is_err,
                         "result": res_json if not is_err else None,
                         "error": res_json.get("_text") if is_err else None
+                    })
+
+                elif server == "calendar":
+                    try:
+                        cal = await ensure_calendar_session()
+                    except Exception as e:
+                        results.append({
+                            "server": "calendar", "tool": "init",
+                            "args": {"entry": CAL_SERVER_ENTRY},
+                            "ok": False,
+                            "result": None,
+                            "error": str(e)
+                        })
+                        continue 
+                    if tool in ("get_daily_agenda", "get_agenda"):
+                        res = await cal.call_tool(tool, {"when": args.get("when")})
+                    elif tool == "create_calendar_event":
+                        payload = {
+                            "title": args.get("title"),
+                            "when": args.get("when"),
+                            "duration_minutes": int(args.get("duration_minutes", 60)),
+                            "meet_link": bool(args.get("meet_link", False)),
+                        }
+                        res = await cal.call_tool(tool, payload)
+                    elif tool == "send_daily_summary":
+                        res = await cal.call_tool("send_daily_summary", {})
+                    else:
+                        raise ValueError(f"Herramienta calendar no soportada: {tool}")
+
+                    res_json, is_err = _dump_result(res)
+                    results.append({
+                        "server": server, "tool": tool, "args": args,
+                        "ok": not is_err,
+                        "result": None if is_err else res_json,
+                        "error": (res_json.get("_text") or "Tool returned isError") if is_err else None,
                     })
 
             except Exception as e:

@@ -1,2 +1,5 @@
 .env
 mcp/spotify/.env.example
+mcp/calendar/credentials.json
+mcp/calendar/token.json
+mcp/calendar/*.log
