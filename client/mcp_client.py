@@ -106,14 +106,12 @@ def _dump_result(res_obj):
     else:
         try:
             from dataclasses import asdict
-            data = asdict(res_obj)  # por si fuese dataclass
+            data = asdict(res_obj)  
         except Exception:
             data = {"_repr": repr(res_obj)}
 
-    # bandera de error (protocolo MCP)
     is_err = bool(data.get("isError"))
 
-    # extrae texto (si lo hay) de 'content'
     text_chunks = []
     for item in (data.get("content") or []):
         t = item.get("text")
@@ -213,7 +211,6 @@ class LolLineClient:
             cwd=self.cwd,
             env=self.env,
         )
-        # initialize RPC (su server soporta "initialize")
         self.rpc("initialize", {})
 
     def rpc(self, method: str, params: dict | None = None, timeout: float = 60.0):
@@ -222,16 +219,13 @@ class LolLineClient:
         rid = self._next_id()
         req = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}}
 
-        # --- enviar framing MCP con Content-Length ---
         body = _json.dumps(req, ensure_ascii=False).encode("utf-8")
         header = f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8")
         assert self.proc.stdin is not None
         self.proc.stdin.buffer.write(header + body)
         self.proc.stdin.buffer.flush()
 
-        # --- leer respuesta (Content-Length framing) ---
         assert self.proc.stdout is not None
-        # 1) leer headers hasta \r\n\r\n
         header_bytes = b""
         while b"\r\n\r\n" not in header_bytes:
             ch = self.proc.stdout.buffer.read(1)
@@ -264,7 +258,6 @@ class LolLineClient:
             raise RuntimeError(msg)
         return data.get("result")
     def call_tool(self, name: str, arguments: dict):
-        # El server de tu compañero expone tools vía "tools/call"
         return self.rpc("tools/call", {"name": name, "arguments": arguments})
 
 # ====== Ejecutor principal ======
@@ -280,12 +273,11 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     results: List[Dict[str, Any]] = []
 
-    # --- Calcular dirs permitidos para Filesystem ---
     targets = _collect_target_paths(actions)
     allowed_dirs = sorted({_nearest_existing_dir(os.path.dirname(t)) for t in targets if t})
 
     async with AsyncExitStack() as stack:
-        # ------- Filesystem (npx / npx.cmd en Windows) -------
+        # ------- Filesystem  -------
         fs_session: Optional[ClientSession] = None
         if allowed_dirs:
             npx_cmd = "npx.cmd" if os.name == "nt" else "npx"
@@ -307,7 +299,7 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 })
                 fs_session = None
 
-        # ------- Git (lazy por repo) -------
+        # ------- Git  -------
         git_sessions: Dict[str, ClientSession] = {}
 
         async def ensure_git_session(repo_path: str) -> ClientSession:
@@ -315,11 +307,11 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             if rp in git_sessions:
                 return git_sessions[rp]
 
-            os.makedirs(rp, exist_ok=True)  # 1) garantiza carpeta
-            if not _is_git_repo(rp):        # 2) si no es repo, init con CLI
+            os.makedirs(rp, exist_ok=True)  
+            if not _is_git_repo(rp):        
                 _git_cli_init(rp)
 
-            git_params = StdioServerParameters(  # 3) usa el MISMO Python del app
+            git_params = StdioServerParameters(  
                 command=sys.executable,
                 args=["-m", "mcp_server_git", "--repository", rp],
                 env={**os.environ, "NO_COLOR": "1"},
@@ -331,9 +323,9 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             git_sessions[rp] = g_sess
             return g_sess
 
-        # ------- Spotify (lazy global) -------
+        # ------- Spotify -------
         spotify_session: Optional[ClientSession] = None
-        PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))  # ajusta si hace falta
+        PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))  
         BASE_ENV = {
             **os.environ,
             "NO_COLOR": "1",
@@ -356,13 +348,12 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 await spotify_session.initialize()
                 return spotify_session
             except Exception as e:
-                # Propaga un error legible para el finalizer
                 raise RuntimeError(
                     f"No pude iniciar el servidor MCP de Spotify. CMD={SPOTIFY_SERVER_CMD} "
                     f"ARGS={SPOTIFY_SERVER_ARGS} ERROR={e}"
                 )
 
-        # ------- LoL (lazy global) -------
+        # ------- LoL -------
         lol_client: Optional[LolLineClient] = None
 
         def ensure_lol_client() -> LolLineClient:
@@ -378,7 +369,7 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 
-        # ------- Movies HTTP (lazy) -------
+        # ------- Movies HTTP  -------
         movies_client: Optional[MoviesHttpClient] = None
 
         def ensure_movies_client() -> MoviesHttpClient:
@@ -390,7 +381,7 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             movies_client = mc
             return mc
         
-        # ------- Remote MCP (Cloud Run HTTP) -------
+        # ------- Remote MCP  -------
         time_client: Optional[TimeHttpClient] = None
 
         def ensure_time_client() -> TimeHttpClient:
@@ -445,7 +436,7 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                         tool = tool.split(".", 1)[1]
                     sp = await ensure_spotify_session()
 
-                    # ==== tools soportadas ====
+                    # ==== tools  ====
                     if tool == "whoami":
                         res = await sp.call_tool("whoami", {})
                     elif tool == "auth_begin":
@@ -553,15 +544,12 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     })
 
                 elif server == "lol":
-                    # Usa el cliente line-based
                     lc = ensure_lol_client()
                     if tool in ("fetch_static_data", "analyze_enemies", "suggest_items", "suggest_runes", "suggest_summoners", "plan_build"):
-                        # All tools use tools/call method
                         res = lc.call_tool(tool, args)
                     else:
                         raise ValueError(f"Herramienta lol no soportada: {tool}")
 
-                    # En el server “line-based” el result ya es dict final (no MCP content)
                     results.append({
                         "server": server, "tool": tool, "args": args,
                         "ok": True, "result": res, "error": None
@@ -611,7 +599,6 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                         })
 
                 else:
-                    # servidor/descripción desconocida
                     results.append({
                         "server": server, "tool": tool, "args": args,
                         "ok": False, "result": None,

@@ -61,6 +61,23 @@ def _build_user_client() -> Optional[spotipy.Spotify]:
 
 
 class SpotifyService:
+    """
+    A service class for interacting with the Spotify Web API.
+    Provides methods for searching tracks, getting recommendations, managing playlists,
+    and controlling playback. Handles both application-only and user-authenticated
+    operations.
+    Attributes:
+        market (str): Market/country code for Spotify API requests (default: "US")
+        clients (SpotifyClients): Container for app and user Spotify client instances
+    Methods:
+        search_tracks: Search for tracks by query string
+        recommendations: Get track recommendations based on seeds and audio features
+        audio_features_map: Retrieve audio features for multiple tracks
+        create_playlist: Create a new playlist (requires user auth)
+        add_to_playlist: Add tracks to an existing playlist (requires user auth)
+        list_devices: Get available playback devices (requires user auth)
+        start_or_transfer: Start playback on a device (requires user auth)
+    """
     def __init__(self):
         self.market = os.environ.get("SPOTIFY_MARKET", "US")
         self.clients = SpotifyClients(app=_build_app_client(), user=None)
@@ -319,7 +336,6 @@ class SpotifyService:
             sp.start_playback(device_id=device_id, context_uri=playlist_uri)
             return "playing"
         except spotipy.exceptions.SpotifyException as e:
-            # 403 => no Premium / restricción de playback
             if e.http_status == 403:
                 return "not_premium"
             raise

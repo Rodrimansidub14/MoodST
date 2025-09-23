@@ -64,6 +64,18 @@ def _build_bot_user_client() -> spotipy.Spotify:
     return spotipy.Spotify(auth_manager=oauth, requests_timeout=10, retries=3)
 
 class SpotifyService:
+    """
+    Spotify API service wrapper for managing music operations.
+    Handles both app-only and user-authenticated Spotify operations including
+    search, recommendations, playlist management, and playback control.
+    Attributes:
+        market (str): Market/country code for Spotify API requests
+        clients (SpotifyClients): Container for app and user Spotify clients
+    Note:
+        Requires SPOTIFY_MARKET environment variable (defaults to "US")
+        User operations require OAuth authentication via set_user_auth_manager()
+    """
+
     def __init__(self):
         self.market = os.environ.get("SPOTIFY_MARKET", "US")
         self.clients = SpotifyClients(app=_build_app_client(), user=None)

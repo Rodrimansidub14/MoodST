@@ -232,6 +232,18 @@ def fallback_plan(user_msg: str) -> dict:
     }
 
 def plan_llm(user_msg: str, history_msgs: list[dict]) -> dict:
+    """
+    Generate a plan using LLM based on user message and conversation history.
+    Args:
+        user_msg: Current user command/request
+        history_msgs: List of previous conversation messages with 'role' and 'content' keys
+    Returns:
+        dict: Plan containing 'reply_preview', 'thought', and 'actions' fields
+    Note:
+        - Uses last 12 messages from history for context
+        - Tries multiple model candidates on failure
+        - Falls back to basic plan if all models fail
+    """
     transcript = "\n".join(
         f"{m.get('role','user')}: {m.get('content','')}"
         for m in (history_msgs or [])[-12:]

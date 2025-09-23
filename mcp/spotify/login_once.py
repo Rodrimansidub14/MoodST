@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from spotipy import Spotify
 from spotipy.oauth2 import SpotifyOAuth
 
-load_dotenv()  # 👈 carga SPOTIPY_* desde .env
+load_dotenv()  
 
 SCOPES = [
     "playlist-modify-public","playlist-modify-private",
@@ -21,7 +21,7 @@ oauth = SpotifyOAuth(
     redirect_uri=os.getenv("SPOTIPY_REDIRECT_URI"),
     cache_path=".cache-bot",
     open_browser=True,
-    show_dialog=True,  # fuerza pantalla de consentimiento => asegura refresh_token
+    show_dialog=True,  
 )
 
 sp = Spotify(auth_manager=oauth)

@@ -4,7 +4,6 @@ from typing import Dict, Any, Callable, List
 
 ENC = "utf-8"
 
-# ==== framing MCP (Content-Length) ====
 def _respond(obj: Dict[str, Any]) -> None:
     body = json.dumps(obj).encode(ENC)
     hdr  = f"Content-Length: {len(body)}\r\nContent-Type: application/json\r\n\r\n".encode(ENC)
@@ -48,7 +47,6 @@ def _read_request():
 def _ok(id_, result):  return {"jsonrpc":"2.0","id":id_,"result":result}
 def _err(id_, msg, code=-32000): return {"jsonrpc":"2.0","id":id_,"error":{"code":code,"message":msg}}
 
-# ===== LoL core =====
 class DDragonClient:
     def __init__(self, version="latest", lang="en_US"):
         self.version = version; self.lang = lang
@@ -253,7 +251,6 @@ def _tool_plan(params: Dict[str, Any]):
         "summoners": suggest_summoners(params["ally_characteristic"], comp)
     }
 
-# ===== JSON-RPC (MCP framing) =====
 def _rpc_initialize(_):
     return {"protocolVersion":"2024-11-05","serverInfo":{"name":"lol-champion-builder","version":"0.3.0"},
             "capabilities":{"tools":{"listChanged": True}}}
@@ -271,7 +268,6 @@ HANDLERS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "initialize": _rpc_initialize,
     "tools/list": _rpc_tools_list,
     "tools/call": _rpc_tools_call,
-    # fetch_static_data es tool, no RPC
 }
 
 def main():

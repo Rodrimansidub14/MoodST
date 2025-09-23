@@ -1,4 +1,4 @@
-# app.py — Retro CRT + Show Reasoning + Typewriter (revised playlist isolation)
+
 import streamlit as st
 from datetime import datetime
 from mcp_client import execute_plan_blocking, fix_plan
@@ -67,7 +67,6 @@ if "messages" not in st.session_state:
         {"role":"assistant","content":"Bienvenido. ¿Qué quieres hacer hoy?","thought":"","ts":datetime.now()},
     ]
 
-# Nueva memoria por playlist + punteros
 if "music_ctx" not in st.session_state:
     st.session_state.music_ctx = {
         "basket_track_ids": [],
@@ -111,7 +110,6 @@ def typewriter(container, text: str, delay: float = 0.01):
         container.markdown(f'<div class="line"><span class="tag">[{HOST}]</span>{out}</div>', unsafe_allow_html=True)
         time.sleep(delay)
 
-# Helpers de intención/nombre
 
 def _slug(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
@@ -188,7 +186,6 @@ def _extract_count(text: str) -> Optional[int]:
 
     if not text:
         return None
-    # dígitos
     m = re.search(r'(\d{1,3})\s*(cancion(?:es)?|tema(?:s)?|tracks?)', text, re.I)
     if m:
         try:
@@ -213,7 +210,7 @@ def _extract_count(text: str) -> Optional[int]:
             pass
     return None
 
-# === Bloque de conexión Spotify (compacto, sin pegar URL) ===
+# === Bloque de conexión Spotify  ===
 
 def _whoami() -> dict:
     res = execute_plan_blocking([{"server":"spotify","tool":"whoami","args":{}}])
@@ -224,21 +221,17 @@ def _whoami() -> dict:
             return data if isinstance(data, dict) else {"authed": False}
     return {"authed": False}
 
-# 1) Si volvimos de Spotify con ?code=..., completa OAuth sin pedir nada
 params = st.query_params if hasattr(st, "query_params") else st.experimental_get_query_params()
 code_in_url = params.get("code", [None])
 code_in_url = code_in_url[0] if isinstance(code_in_url, list) else code_in_url
 
 if code_in_url:
-    # Llama a auth_complete con code (no necesitamos la URL entera)
     res = execute_plan_blocking([{"server":"spotify","tool":"auth_complete","args":{"code": code_in_url}}])
-    # Limpia el query param para no reintentar en cada rerun
     if hasattr(st, "query_params"):
         st.query_params.clear()
     else:
         st.experimental_set_query_params()
 
-# 2) UI de estado + botón “Conectar Spotify”
 who = _whoami()
 if not who.get("authed") and st.session_state.get("last_auth_url"):
     st.link_button("Conectar Spotify", st.session_state["last_auth_url"])
@@ -251,17 +244,14 @@ if not who.get("authed"):
             if r.get("server")=="spotify" and r.get("tool")=="auth_begin" and r.get("ok"):
                 res = r.get("result") or {}
 
-                # 1) structuredContent (si el server lo envía así)
                 sc = (res.get("structuredContent") or {}).get("result")
                 if isinstance(sc, dict) and sc.get("authorize_url"):
                     auth_url = sc["authorize_url"]
                 else:
-                    # 2) parsea el JSON del _text
                     raw = res.get("_text") or ""
                     try:
                         auth_url = json.loads(raw).get("authorize_url")
                     except Exception:
-                        # 3) último recurso: regex que corta antes de comillas
                         m = re.search(r'https?://[^"\s]+', raw)
                         auth_url = m.group(0) if m else None
 
@@ -305,28 +295,23 @@ if user_msg:
 
 
     if _intent_is_new_playlist(lower_msg) and st.session_state.music_ctx["last_public"] is None:
-        st.session_state.music_ctx["last_public"] = False  # default privado
-    # Flags público/privado
+        st.session_state.music_ctx["last_public"] = False  
     if any(w in lower_msg for w in ("pública","publica","hacerla pública","hazla pública","hazla publica")):
         st.session_state.music_ctx["last_public"] = True
     elif any(w in lower_msg for w in ("privada","hacerla privada","hazla privada")):
         st.session_state.music_ctx["last_public"] = False
     elif _wants_link(lower_msg) and st.session_state.music_ctx.get("last_public") is None:
-        # Si piden link y no definieron privacidad, asumimos pública para poder crear
         st.session_state.music_ctx["last_public"] = True
 
     reasoning_box = st.empty()
     typing_box = st.empty()
 
-    # Resolver link de playlist (con nombre o ref. a la última)
     if "link" in lower_msg and "playlist" in lower_msg:
-        # 1) intenta extraer nombre
         raw_name = None
         m = re.search(r"link .*playlist\s+([\"“][^\"”]+[\"”]|[^\n]+)$", lower_msg)
         if m:
             raw_name = m.group(1).strip().strip('"“”')
         else:
-            # frases como "esta playlist", "la playlist", etc.
             if re.search(r"\b(esta|la)\s+playlist\b", lower_msg):
                 raw_name = None  # usar la última creada
 
@@ -373,7 +358,6 @@ if user_msg:
         execution_results = execute_plan_blocking(actions)
         for r in execution_results or []:
             if r.get("server") == "spotify" and r.get("ok"):
-                # cesto de tracks
                 if r.get("tool") == "search_track":
                     data = (r.get("result") or {}).get("parsed") or None
                     if not data:
@@ -405,7 +389,6 @@ if user_msg:
                     if isinstance(data, dict) and data.get("url"):
                         st.session_state.music_ctx["last_playlist_url"] = data["url"]
                         st.session_state.music_ctx["last_playlist_id"]  = data.get("playlist_id")
-                        # registro por nombre
                         name_key = _slug(st.session_state.music_ctx.get("last_playlist_name") or "mi mix")
                         st.session_state.music_ctx["playlists"][name_key] = {
                             "id": data.get("playlist_id"),
@@ -417,13 +400,12 @@ if user_msg:
                         st.session_state.music_ctx["target_count"] = None
 
 
-    # === Auto-creación POST–ejecución (si el plan no la hizo)
+    # === Auto-creación POST–ejecución 
     target = st.session_state.music_ctx.get("target_count")
     basket_len = len(st.session_state.music_ctx["basket_track_ids"])
     if target is not None and basket_len < target and _is_playlist_intent(user_msg):
         faltan = target - basket_len
         final_text = f"✔️ Llevo {basket_len} canciones. Me faltan {faltan} para llegar a {target}. ¿Quieres que añada recomendaciones para completar?"
-        # typewriter
         out = ""
         for ch in final_text:
             out += ch
