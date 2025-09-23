@@ -255,6 +255,33 @@ publish.py           # Optional: helper for publishing repos or assets
 requirements.txt     # Python dependencies
 README.md            # This file
 ```
+## Note on the use of LLMS
+Large Language Models (LLMs) played a significant role throughout this project's lifecycle, from initial concept development to final code implementation. This section outlines how these AI tools were leveraged responsibly and ethically.
+
+### Ideation and Planning
+- **Concept Development**: Used LLMs to brainstorm project ideas, explore different approaches, and evaluate feasibility
+- **Architecture Design**: Leveraged AI assistance to discuss system design patterns and best practices
+- **Research Support**: Employed LLMs to summarize relevant documentation, frameworks, and technical concepts
+
+### Code Generation and Development
+- **Boilerplate Creation**: Generated initial project structure, configuration files, and common patterns
+- **Function Implementation**: Used AI assistance for specific algorithms, utility functions, and complex logic
+- **Code Review**: Employed LLMs to identify potential issues, suggest improvements, and ensure best practices
+- **Documentation**: Generated inline comments, docstrings, and README sections with AI support
+
+### Ethical Considerations and Best Practices
+- **Human Oversight**: All AI-generated code was thoroughly reviewed, tested, and validated by human developers
+- **Intellectual Property**: Ensured all generated code complies with licensing requirements and doesn't violate copyrights
+- **Transparency**: Openly documenting LLM usage to maintain project transparency and reproducibility
+- **Quality Assurance**: Implemented comprehensive testing to verify the correctness and security of AI-assisted code
+- **Learning Integration**: Used LLM interactions as learning opportunities rather than blind code copying
+
+### Limitations and Mitigations
+- **Code Verification**: Never deployed AI-generated code without thorough testing and validation
+- **Context Awareness**: Recognized that LLMs may lack full project context and required human judgment for integration
+- **Security Review**: Conducted additional security assessments on AI-generated components
+- **Performance Optimization**: Manually optimized AI-generated code for project-specific requirements
+
 
 ## 🔐 Security Notes
 - Keep your .env out of version control (use .gitignore).
