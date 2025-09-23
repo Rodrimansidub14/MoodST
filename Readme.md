@@ -16,7 +16,8 @@
 10. [Using MCP Externally (Inspector)](#using-mcp-externally-inspector)
 11. [Troubleshooting](#troubleshooting)
 12. [Project Structure](#project-structure)
-13. [Security Notes](#security-notes)
+13. [A note on the use of AI](#LLM-Use)
+14. [Security Notes](#security-notes)
 
 ---
 
