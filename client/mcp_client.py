@@ -194,22 +194,48 @@ class LolLineClient:
             raise RuntimeError("MCP LoL process not running.")
         rid = self._next_id()
         req = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}}
-        line = json.dumps(req, ensure_ascii=False)
-        assert self.proc.stdin is not None
-        assert self.proc.stdout is not None
-        self.proc.stdin.write(line + "\n")
-        self.proc.stdin.flush()
 
-        resp_line = self.proc.stdout.readline()
-        if not resp_line:
-            err = (self.proc.stderr.read() if self.proc.stderr else "") or "no response"
-            raise RuntimeError(f"No response from LoL MCP server.\nStderr:\n{err}")
-        data = json.loads(resp_line)
+        # --- enviar framing MCP con Content-Length ---
+        body = _json.dumps(req, ensure_ascii=False).encode("utf-8")
+        header = f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8")
+        assert self.proc.stdin is not None
+        self.proc.stdin.buffer.write(header + body)
+        self.proc.stdin.buffer.flush()
+
+        # --- leer respuesta (Content-Length framing) ---
+        assert self.proc.stdout is not None
+        # 1) leer headers hasta \r\n\r\n
+        header_bytes = b""
+        while b"\r\n\r\n" not in header_bytes:
+            ch = self.proc.stdout.buffer.read(1)
+            if not ch:
+                err = (self.proc.stderr.read() if self.proc.stderr else "") or "no response"
+                raise RuntimeError(f"No response from LoL MCP server.\nStderr:\n{err}")
+            header_bytes += ch
+        head, rest = header_bytes.split(b"\r\n\r\n", 1)
+
+        length = None
+        for line in head.decode("utf-8", errors="ignore").splitlines():
+            if line.lower().startswith("content-length:"):
+                length = int(line.split(":", 1)[1].strip())
+                break
+        if length is None:
+            raise RuntimeError("Respuesta sin Content-Length")
+
+        body = rest
+        to_read = length - len(body)
+        while to_read > 0:
+            chunk = self.proc.stdout.buffer.read(to_read)
+            if not chunk:
+                raise RuntimeError("EOF al leer body de respuesta LoL MCP")
+            body += chunk
+            to_read -= len(chunk)
+
+        data = _json.loads(body.decode("utf-8", errors="ignore"))
         if "error" in data:
             msg = data["error"].get("message", "Unknown MCP error")
             raise RuntimeError(msg)
         return data.get("result")
-
     def call_tool(self, name: str, arguments: dict):
         # El server de tu compañero expone tools vía "tools/call"
         return self.rpc("tools/call", {"name": name, "arguments": arguments})
@@ -490,13 +516,8 @@ async def execute_plan(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 elif server == "lol":
                     # Usa el cliente line-based
                     lc = ensure_lol_client()
-                    if tool == "fetch_static_data":
-                        # tu server expone fetch como RPC dedicado
-                        res = lc.rpc("fetch_static_data", {
-                            "ddragon_version": args.get("ddragon_version", "latest"),
-                            "lang": args.get("lang", "en_US"),
-                        })
-                    elif tool in ("analyze_enemies", "suggest_items", "suggest_runes", "suggest_summoners", "plan_build"):
+                    if tool in ("fetch_static_data", "analyze_enemies", "suggest_items", "suggest_runes", "suggest_summoners", "plan_build"):
+                        # All tools use tools/call method
                         res = lc.call_tool(tool, args)
                     else:
                         raise ValueError(f"Herramienta lol no soportada: {tool}")
